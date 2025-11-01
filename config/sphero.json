@@ -1,0 +1,7 @@
+{
+  "auto_connect": true,
+  "battery_monitoring": true,
+  "led_brightness": 0.8,
+  "connection_timeout": 30,
+  "autonomous_mode": true
+}

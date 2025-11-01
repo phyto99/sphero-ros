@@ -1,0 +1,45 @@
+{
+  "tasks": [
+    {
+      "id": "4e36add2-e2a9-43b1-b046-48bd161917a8",
+      "title": "Research AI algorithms",
+      "description": "Study machine learning techniques",
+      "priority": "high",
+      "completed": true,
+      "created_at": "2025-09-30T23:07:57.319803",
+      "updated_at": "2025-09-30T23:07:57.321463",
+      "ai_can_help": true
+    },
+    {
+      "id": "43662fd4-5cd5-4eff-b818-b6c759191f0e",
+      "title": "Buy groceries",
+      "description": "Go to store and buy milk",
+      "priority": "medium",
+      "completed": false,
+      "created_at": "2025-09-30T23:07:57.320346",
+      "updated_at": "2025-09-30T23:07:57.320346",
+      "ai_can_help": false
+    },
+    {
+      "id": "b23b5b81-b34f-4d15-90c4-50fa506b2489",
+      "title": "Write documentation",
+      "description": "Document the API endpoints",
+      "priority": "low",
+      "completed": false,
+      "created_at": "2025-09-30T23:07:57.320832",
+      "updated_at": "2025-10-01T11:24:11.961625",
+      "ai_can_help": true
+    },
+    {
+      "id": "0ace1976-a8da-4403-811a-048864886204",
+      "title": "Test",
+      "description": "",
+      "priority": "medium",
+      "completed": false,
+      "created_at": "2025-10-01T16:24:20.093813",
+      "updated_at": "2025-10-01T16:24:20.093813",
+      "ai_can_help": false
+    }
+  ],
+  "last_updated": "2025-10-01T16:24:20.094136"
+}

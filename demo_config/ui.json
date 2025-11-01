@@ -1,0 +1,8 @@
+{
+  "theme": "modern",
+  "auto_startup_ui": true,
+  "show_status_display": true,
+  "task_management_enabled": true,
+  "ai_assistance_highlighting": true,
+  "progress_tracking_visible": true
+}

@@ -1,0 +1,8 @@
+{
+  "auto_startup": true,
+  "ollama_auto_init": true,
+  "ui_theme": "modern",
+  "log_level": "DEBUG",
+  "sphero_auto_connect": true,
+  "monitoring_enabled": true
+}

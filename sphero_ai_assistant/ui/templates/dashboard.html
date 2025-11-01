@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sphero AI Assistant Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f8f9fa;
+            min-height: 100vh;
+            color: #2d3748;
+            padding: 20px;
+        }
+        .container { 
+            max-width: 1200px; 
+            margin: 0 auto; 
+        }
+        .header { 
+            background: white; 
+            padding: 20px; 
+            margin-bottom: 20px; 
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 { font-size: 2rem; font-weight: 600; }
+        .status-badge { 
+            background: #48bb78; 
+            color: white; 
+            padding: 8px 16px; 
+            border-radius: 20px;
+            font-size: 0.75rem; 
+            font-weight: 600;
+        }
+        .grid { 
+            display: grid; 
+            grid-template-columns: 1fr 1fr; 
+            gap: 20px; 
+            margin-bottom: 20px;
+        }
+        .panel { 
+            background: white; 
+            padding: 20px; 
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .panel h2 { margin-bottom: 16px; font-size: 1.25rem; }
+        .status-grid { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); 
+            gap: 12px;
+        }
+        .status-item { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            padding: 12px; 
+            background: #f8f9fa; 
+            border: 1px solid #e2e8f0;
+            border-left: 4px solid #e2e8f0;
+            border-radius: 8px;
+        }
+        .status-item.online { border-left-color: #48bb78; }
+        .status-item.offline { border-left-color: #f56565; }
+        .status-indicator { 
+            width: 8px; 
+            height: 8px; 
+            background: #e2e8f0;
+        }
+        .status-item.online .status-indicator { background: #48bb78; }
+        .status-item.offline .status-indicator { background: #f56565; }
+        .progress-item { 
+            display: flex; 
+            align-items: center; 
+            gap: 12px; 
+            margin-bottom: 12px;
+            padding: 8px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        .progress-label { min-width: 100px; font-weight: 500; }
+        .progress-bar { 
+            flex: 1; 
+            height: 6px; 
+            background: #e2e8f0; 
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .progress-fill { 
+            height: 100%; 
+            background: #48bb78; 
+            transition: width 0.3s ease;
+        }
+        .progress-text { font-size: 0.75rem; color: #718096; }
+        .task-panel { grid-column: 1 / -1; }
+        .add-task-form { 
+            display: flex; 
+            gap: 8px; 
+            margin-bottom: 20px; 
+            background: white; 
+            padding: 12px; 
+            border: 1px solid #e2e8f0;
+        }
+        .add-task-form input, .add-task-form select { 
+            padding: 8px 12px; 
+            border: 1px solid #e2e8f0; 
+            font-size: 14px;
+        }
+        .add-task-form input[type="text"] { flex: 1; }
+        .add-task-form button { 
+            background: #48bb78; 
+            color: white; 
+            border: none; 
+            padding: 8px 16px; 
+            cursor: pointer; 
+            font-weight: 500;
+        }
+        .add-task-form button:hover { background: #38a169; }
+        .task-item { 
+            display: flex; 
+            align-items: flex-start; 
+            gap: 12px; 
+            padding: 12px; 
+            border: 1px solid #e2e8f0; 
+            margin-bottom: 8px;
+            background: white;
+        }
+        .task-item.ai-assistable { border-left: 4px solid #48bb78; }
+        .task-item.completed { opacity: 0.6; }
+        .task-item.completed .task-title { text-decoration: line-through; }
+        .task-content { flex: 1; }
+        .task-title { font-weight: 500; margin-bottom: 4px; }
+        .task-description { font-size: 0.875rem; color: #718096; margin-bottom: 8px; }
+        .task-meta { display: flex; gap: 8px; }
+        .task-priority { 
+            font-size: 0.75rem; 
+            padding: 2px 8px; 
+            background: #e2e8f0; 
+            color: #4a5568;
+        }
+        .task-priority.priority-high { background: #fed7d7; color: #c53030; }
+        .task-priority.priority-medium { background: #feebc8; color: #dd6b20; }
+        .task-priority.priority-low { background: #c6f6d5; color: #2f855a; }
+        .ai-help-indicator { 
+            font-size: 0.75rem; 
+            background: #c6f6d5; 
+            color: #2f855a; 
+            padding: 2px 8px;
+        }
+        .task-actions { display: flex; gap: 4px; }
+        .task-actions button { 
+            background: #f7fafc; 
+            border: 1px solid #e2e8f0; 
+            padding: 4px 8px; 
+            cursor: pointer; 
+            font-size: 0.75rem;
+        }
+        .task-actions button:hover { background: #edf2f7; }
+        
+        /* Sphero Control Panel */
+        .sphero-controls { display: flex; flex-direction: column; gap: 16px; }
+        .sphero-status { display: flex; flex-direction: column; gap: 8px; }
+        .status-row { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+            padding: 8px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+        .status-row .label { font-weight: 500; color: #4a5568; }
+        .status-row .status-value { font-weight: 600; }
+        .sphero-actions { 
+            display: flex; 
+            gap: 8px; 
+            flex-wrap: wrap;
+        }
+        .sphero-btn { 
+            background: #667eea; 
+            color: white; 
+            border: none; 
+            padding: 8px 16px; 
+            border-radius: 6px;
+            cursor: pointer; 
+            font-weight: 500;
+            font-size: 14px;
+        }
+        .sphero-btn:hover { background: #5a67d8; }
+        .sphero-btn:disabled { 
+            background: #cbd5e0; 
+            cursor: not-allowed; 
+        }
+        #sphero-connection-status.connected { color: #48bb78; }
+        #sphero-connection-status.disconnected { color: #f56565; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div>
+                <h1>Sphero AI Assistant</h1>
+                <div>{{ current_time }}</div>
+            </div>
+            <div class="status-badge">System Ready</div>
+        </header>
+        
+        <div class="grid">
+            <div class="panel">
+                <h2>System Status</h2>
+                <div class="status-grid">
+                    {% for component, status in system_status.components.items() %}
+                    <div class="status-item {{ 'online' if status else 'offline' }}">
+                        <span>{{ component.replace('_', ' ').title() }}</span>
+                        <span class="status-indicator"></span>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            
+            <div class="panel">
+                <h2>Progress Tracking</h2>
+                {% for item in progress_data %}
+                <div class="progress-item">
+                    <div class="progress-label">{{ item.name }}</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: {{ item.percentage }}%"></div>
+                    </div>
+                    <div class="progress-text">{{ item.current }}/{{ item.total }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        
+        <!-- Sphero Control Panel -->
+        <div class="panel">
+            <h2>Sphero Control</h2>
+            <div class="sphero-controls">
+                <div class="sphero-status">
+                    <div class="status-row">
+                        <span class="label">Connection:</span>
+                        <span id="sphero-connection-status" class="status-value">Disconnected</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="label">Battery:</span>
+                        <span id="sphero-battery-level" class="status-value">--</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="label">Mode:</span>
+                        <span id="sphero-mode" class="status-value">Idle</span>
+                    </div>
+                </div>
+                <div class="sphero-actions">
+                    <button id="connect-sphero-btn" onclick="connectSphero()" class="sphero-btn">Connect Sphero</button>
+                    <button id="test-led-btn" onclick="testLED()" class="sphero-btn" disabled>Test LED</button>
+                    <button id="show-simulator-btn" onclick="showSimulator()" class="sphero-btn">Show Simulator</button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="panel task-panel">
+            <h2>Daily Tasks</h2>
+            
+            <div class="add-task-form">
+                <input type="text" id="task-title" placeholder="What needs to be done?" />
+                <input type="text" id="task-description" placeholder="Add details..." />
+                <select id="task-priority">
+                    <option value="low">Low</option>
+                    <option value="medium" selected>Medium</option>
+                    <option value="high">High</option>
+                </select>
+                <button onclick="addTask()">Add Task</button>
+            </div>
+            
+            <div id="tasks-list">
+                {% for task in tasks %}
+                <div class="task-item {{ 'ai-assistable' if task.ai_can_help else '' }} {{ 'completed' if task.completed else '' }}" data-task-id="{{ task.id }}">
+                    <input type="checkbox" {{ 'checked' if task.completed else '' }} onchange="toggleTask('{{ task.id }}')">
+                    <div class="task-content">
+                        <div class="task-title">{{ task.title }}</div>
+                        {% if task.description %}
+                        <div class="task-description">{{ task.description }}</div>
+                        {% endif %}
+                        <div class="task-meta">
+                            <span class="task-priority priority-{{ task.priority }}">{{ task.priority }}</span>
+                            {% if task.ai_can_help %}
+                            <span class="ai-help-indicator">🤖 AI can help</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div class="task-actions">
+                        <button onclick="editTask('{{ task.id }}')">Edit</button>
+                        <button onclick="deleteTask('{{ task.id }}')">Delete</button>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        async function addTask() {
+            const title = document.getElementById('task-title').value.trim();
+            const description = document.getElementById('task-description').value.trim();
+            const priority = document.getElementById('task-priority').value;
+            
+            if (!title) {
+                alert('Please enter a task title');
+                return;
+            }
+            
+            try {
+                const formData = new FormData();
+                formData.append('title', title);
+                formData.append('description', description);
+                formData.append('priority', priority);
+                
+                const response = await fetch('/api/tasks', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (response.ok) {
+                    document.getElementById('task-title').value = '';
+                    document.getElementById('task-description').value = '';
+                    document.getElementById('task-priority').value = 'medium';
+                    window.location.reload();
+                } else {
+                    alert('Failed to add task');
+                }
+            } catch (error) {
+                console.error('Failed to add task:', error);
+                alert('Failed to add task');
+            }
+        }
+        
+        async function toggleTask(taskId) {
+            try {
+                const taskItem = document.querySelector(`[data-task-id="${taskId}"]`);
+                const checkbox = taskItem.querySelector('input[type="checkbox"]');
+                
+                const formData = new FormData();
+                formData.append('completed', checkbox.checked);
+                
+                const response = await fetch(`/api/tasks/${taskId}`, {
+                    method: 'PUT',
+                    body: formData
+                });
+                
+                if (response.ok) {
+                    if (checkbox.checked) {
+                        taskItem.classList.add('completed');
+                    } else {
+                        taskItem.classList.remove('completed');
+                    }
+                } else {
+                    checkbox.checked = !checkbox.checked;
+                    alert('Failed to update task');
+                }
+            } catch (error) {
+                console.error('Failed to toggle task:', error);
+                alert('Failed to update task');
+            }
+        }
+        
+        async function editTask(taskId) {
+            const taskItem = document.querySelector(`[data-task-id="${taskId}"]`);
+            const titleElement = taskItem.querySelector('.task-title');
+            const descriptionElement = taskItem.querySelector('.task-description');
+            
+            const currentTitle = titleElement.textContent;
+            const currentDescription = descriptionElement ? descriptionElement.textContent : '';
+            
+            const newTitle = prompt('Edit task title:', currentTitle);
+            if (newTitle === null) return;
+            
+            const newDescription = prompt('Edit task description:', currentDescription);
+            if (newDescription === null) return;
+            
+            try {
+                const formData = new FormData();
+                formData.append('title', newTitle);
+                formData.append('description', newDescription);
+                
+                const response = await fetch(`/api/tasks/${taskId}`, {
+                    method: 'PUT',
+                    body: formData
+                });
+                
+                if (response.ok) {
+                    window.location.reload();
+                } else {
+                    alert('Failed to update task');
+                }
+            } catch (error) {
+                console.error('Failed to edit task:', error);
+                alert('Failed to update task');
+            }
+        }
+        
+        async function deleteTask(taskId) {
+            if (!confirm('Are you sure you want to delete this task?')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/tasks/${taskId}`, {
+                    method: 'DELETE'
+                });
+                
+                if (response.ok) {
+                    window.location.reload();
+                } else {
+                    alert('Failed to delete task');
+                }
+            } catch (error) {
+                console.error('Failed to delete task:', error);
+                alert('Failed to delete task');
+            }
+        }
+        
+        // Sphero Control Functions
+        async function connectSphero() {
+            // First scan for available Spheros
+            const btn = document.getElementById('connect-sphero-btn');
+            const statusEl = document.getElementById('sphero-connection-status');
+            
+            btn.disabled = true;
+            btn.textContent = 'Scanning...';
+            
+            try {
+                // Scan for Spheros first
+                const scanResponse = await fetch('/api/sphero/scan');
+                const scanResult = await scanResponse.json();
+                
+                if (!scanResult.success || scanResult.spheros.length === 0) {
+                    statusEl.textContent = 'No Spheros Found';
+                    statusEl.className = 'status-value disconnected';
+                    btn.textContent = 'Connect Sphero';
+                    alert('No Sphero devices found. Make sure your Sphero is turned on and nearby.');
+                    btn.disabled = false;
+                    return;
+                }
+                
+                // If multiple Spheros found, let user choose
+                let selectedSphero = null;
+                if (scanResult.spheros.length > 1) {
+                    const spheroNames = scanResult.spheros.map(s => `${s.name} (${s.type})`);
+                    const choice = prompt(`Multiple Spheros found. Choose one:\n${spheroNames.map((name, i) => `${i+1}. ${name}`).join('\n')}\n\nEnter number (1-${spheroNames.length}):`);
+                    
+                    const choiceIndex = parseInt(choice) - 1;
+                    if (choiceIndex >= 0 && choiceIndex < scanResult.spheros.length) {
+                        selectedSphero = scanResult.spheros[choiceIndex].name;
+                    } else {
+                        btn.textContent = 'Connect Sphero';
+                        btn.disabled = false;
+                        return;
+                    }
+                } else {
+                    selectedSphero = scanResult.spheros[0].name;
+                }
+                
+                btn.textContent = 'Connecting...';
+                
+                // Connect to selected Sphero
+                const formData = new FormData();
+                if (selectedSphero) {
+                    formData.append('sphero_name', selectedSphero);
+                }
+                
+                const response = await fetch('/api/sphero/connect', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    statusEl.textContent = `Connected to ${selectedSphero}`;
+                    statusEl.className = 'status-value connected';
+                    btn.textContent = 'Disconnect';
+                    btn.onclick = disconnectSphero;
+                    document.getElementById('test-led-btn').disabled = false;
+                    
+                    // Update other status info
+                    updateSpheroStatus();
+                } else {
+                    statusEl.textContent = 'Failed to Connect';
+                    statusEl.className = 'status-value disconnected';
+                    btn.textContent = 'Connect Sphero';
+                    alert('Failed to connect to Sphero: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Connection error:', error);
+                statusEl.textContent = 'Connection Error';
+                statusEl.className = 'status-value disconnected';
+                btn.textContent = 'Connect Sphero';
+                alert('Connection error: ' + error.message);
+            }
+            
+            btn.disabled = false;
+        }
+        
+        async function disconnectSphero() {
+            const btn = document.getElementById('connect-sphero-btn');
+            const statusEl = document.getElementById('sphero-connection-status');
+            
+            try {
+                const response = await fetch('/api/sphero/disconnect', {
+                    method: 'POST'
+                });
+                
+                statusEl.textContent = 'Disconnected';
+                statusEl.className = 'status-value disconnected';
+                btn.textContent = 'Connect Sphero';
+                btn.onclick = connectSphero;
+                document.getElementById('test-led-btn').disabled = true;
+                
+                // Clear status info
+                document.getElementById('sphero-battery-level').textContent = '--';
+                document.getElementById('sphero-mode').textContent = 'Idle';
+                
+            } catch (error) {
+                console.error('Disconnect error:', error);
+            }
+        }
+        
+        async function testLED() {
+            try {
+                const response = await fetch('/api/sphero/test-led', {
+                    method: 'POST'
+                });
+                
+                const result = await response.json();
+                if (!result.success) {
+                    alert('LED test failed: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('LED test error:', error);
+                alert('LED test error: ' + error.message);
+            }
+        }
+        
+        function showSimulator() {
+            alert('Simulator window should be visible. If not, check if it was closed or minimized.');
+        }
+        
+        async function updateSpheroStatus() {
+            try {
+                const response = await fetch('/api/sphero/status');
+                const status = await response.json();
+                
+                if (status.available) {
+                    document.getElementById('sphero-battery-level').textContent = 
+                        status.battery_level ? status.battery_level.toFixed(1) + '%' : '--';
+                    document.getElementById('sphero-mode').textContent = 
+                        status.mode ? status.mode.charAt(0).toUpperCase() + status.mode.slice(1) : 'Unknown';
+                }
+            } catch (error) {
+                console.error('Status update error:', error);
+            }
+        }
+        
+        // Update Sphero status every 5 seconds
+        setInterval(updateSpheroStatus, 5000);
+    </script>
+</body>
+</html>
