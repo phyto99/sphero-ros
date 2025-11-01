@@ -353,6 +353,18 @@ class SimpleSpheroTester:
         """Format result for display"""
         return "OK" if result is None else str(result)
     
+    def test_connection(self):
+        """Test if Sphero is actually responding"""
+        if not self.connected or not self.api:
+            return False, "Not connected"
+        
+        try:
+            # Try to get heading - this should work if connected
+            heading = self.api.get_heading()
+            return True, f"✅ Sphero responding - Heading: {heading}°"
+        except Exception as e:
+            return False, f"❌ Sphero not responding: {e}"
+    
     def get_matrix_workarounds(self):
         """Get potential matrix/LED workaround commands"""
         workarounds = []
@@ -374,30 +386,57 @@ class SimpleSpheroTester:
         if force:
             messages.append("🔥 FORCE DISCONNECT - Clearing all connections")
         
-        # Always try to disconnect API
+        # Try to turn off LEDs before disconnecting
         if self.api:
             try:
+                messages.append("🔄 Turning off LEDs before disconnect...")
+                self.api.set_back_led(Color(0, 0, 0))
+                self.api.set_front_led(Color(0, 0, 0))
+                self.api.set_main_led(Color(0, 0, 0))
+                messages.append("✅ LEDs turned off")
+            except Exception as e:
+                messages.append(f"⚠️ LED cleanup error: {e}")
+        
+        # Disconnect API with proper cleanup
+        if self.api:
+            try:
+                # Try to close the connection properly
+                if hasattr(self.api, '_toy') and hasattr(self.api._toy, 'close'):
+                    self.api._toy.close()
+                    messages.append("✅ Toy connection closed")
+                
+                # Exit the API context
                 self.api.__exit__(None, None, None)
-                messages.append("✅ API disconnected")
+                messages.append("✅ API context exited")
+                
             except Exception as e:
                 messages.append(f"⚠️ API disconnect error: {e}")
-            self.api = None
+            finally:
+                self.api = None
+                messages.append("✅ API reference cleared")
         
         # Clear toy reference
         if self.toy:
-            self.toy = None
-            messages.append("✅ Toy reference cleared")
+            try:
+                # Try to close toy connection if it has a close method
+                if hasattr(self.toy, 'close'):
+                    self.toy.close()
+                    messages.append("✅ Direct toy connection closed")
+            except Exception as e:
+                messages.append(f"⚠️ Toy close error: {e}")
+            finally:
+                self.toy = None
+                messages.append("✅ Toy reference cleared")
         
-        # Reset LED states
+        # Reset all states
         self.led_states = {'back_led': False, 'front_led': False, 'main_led': False}
-        
-        # Always mark as disconnected
         self.connected = False
         
         if force:
-            messages.append("🔥 Force disconnect complete - All references cleared")
+            messages.append("🔥 AGGRESSIVE DISCONNECT COMPLETE")
+            messages.append("💡 Sphero should now be available for new connections")
         else:
-            messages.append("👋 Disconnected normally")
+            messages.append("👋 Clean disconnect complete")
         
         return messages
 
@@ -722,6 +761,7 @@ async def get_homepage():
                 <button id="connectBtn" class="btn btn-primary">Connect</button>
                 <button id="disconnectBtn" class="btn btn-danger">Disconnect</button>
                 <button id="forceDisconnectBtn" class="btn btn-danger">Force DC</button>
+                <button id="testBtn" class="btn" style="background: #d29922; color: #fff; font-size: 10px; padding: 4px 8px;">Test</button>
                 <div id="status" class="status disconnected">Disconnected</div>
             </div>
         </div>
@@ -1038,6 +1078,9 @@ async def get_homepage():
                 }
             }
             
+            // DEBUG: Log what we're sending
+            addConsoleMessage(`🚀 Sending: ${commandName}(${params ? params.join(', ') : ''}) [${forceRaw ? 'RAW' : 'EDU'}]`, 'info');
+            
             ws.send(JSON.stringify({
                 action: 'execute_command',
                 command: commandName,
@@ -1047,6 +1090,10 @@ async def get_homepage():
         }
         
         document.getElementById('connectBtn').onclick = function() {
+            // Simple connection progress in console only
+            addConsoleMessage('🔄 Connecting to Sphero...', 'info');
+            showConnectionProgress();
+            
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ action: 'connect' }));
             }
@@ -1054,16 +1101,57 @@ async def get_homepage():
         
         document.getElementById('disconnectBtn').onclick = function() {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ action: 'disconnect' }));
+                ws.send(JSON.stringify({ action: 'disconnect', force: false }));
             }
             connected = false;
             updateStatus(false);
+            resetLEDStates();
+        };
+        
+        document.getElementById('forceDisconnectBtn').onclick = function() {
+            addConsoleMessage('🔥 FORCE DISCONNECT - Clearing ALL connections...', 'warning');
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: 'disconnect', force: true }));
+            }
+            // Always force reset state regardless of WebSocket
+            connected = false;
+            updateStatus(false);
+            resetLEDStates();
+        };
+        
+        document.getElementById('testBtn').onclick = function() {
+            if (!connected) {
+                addConsoleMessage('Not connected - cannot test', 'error');
+                return;
+            }
+            addConsoleMessage('🧪 Testing Sphero connection...', 'info');
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: 'test_connection' }));
+            }
+        };
+        
+        function resetLEDStates() {
             Object.keys(ledStates).forEach(led => {
                 ledStates[led] = false;
                 const btn = document.getElementById(led.replace('_', '') + 'Btn');
                 if (btn) btn.classList.remove('active');
             });
-        };
+        }
+        
+        function showConnectionProgress() {
+            // Simple console-based progress for connection only
+            let dots = 0;
+            const progressInterval = setInterval(() => {
+                dots = (dots + 1) % 4;
+                const dotString = '.'.repeat(dots) + ' '.repeat(3 - dots);
+                addConsoleMessage(`⏳ Connecting${dotString}`, 'info');
+            }, 500);
+            
+            // Stop progress after 5 seconds
+            setTimeout(() => {
+                clearInterval(progressInterval);
+            }, 5000);
+        }
         
         initWebSocket();
     </script>
@@ -1108,6 +1196,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 messages = tester.disconnect(force)
                 for message in messages:
                     await websocket.send_json({'type': 'status', 'data': message})
+                
+            elif action == 'test_connection':
+                success, result = tester.test_connection()
+                await websocket.send_json({'type': 'result', 'data': result})
                 
             elif action == 'execute_command':
                 command = data.get('command')
