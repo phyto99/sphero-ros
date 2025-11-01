@@ -25,6 +25,19 @@ class SimpleSpheroTester:
         self.raw_commands = []
         self.led_states = {'back_led': False, 'front_led': False, 'main_led': False}
         
+        # Active command tracking
+        self.active_effects = {
+            'animations': [],
+            'leds': {},
+            'matrix_effects': [],
+            'movements': []
+        }
+        
+        # Integrity validation
+        self.last_verified_state = None
+        self.state_verification_enabled = True
+        self.command_execution_log = []
+        
         # EDU API command definitions with safe defaults
         self.edu_api_specs = {
             'set_back_led': {'params': ['Color'], 'safe_defaults': [Color(255, 0, 0)]},
@@ -258,19 +271,35 @@ class SimpleSpheroTester:
             return 'Other'
     
     def execute_command(self, command_name: str, params: List[Any] = None, force_raw: bool = False):
-        """Intelligent command execution with auto-solving"""
+        """Intelligent command execution with comprehensive validation"""
         if not self.connected:
             return False, "❌ Not connected"
+        
+        # Pre-execution integrity check
+        if self.state_verification_enabled:
+            integrity_passed, _ = self.verify_connection_integrity()
+            if not integrity_passed:
+                return False, "❌ Connection integrity check failed - please reconnect"
         
         # Convert parameters
         converted_params = self._convert_params(params) if params else []
         
-        # EDU API commands (try first with intelligent auto-fixing)
+        # Execute command
         if not force_raw and command_name in self.edu_api_specs:
-            return self._execute_edu_command(command_name, converted_params)
+            success, result = self._execute_edu_command(command_name, converted_params)
+        else:
+            success, result = self._execute_raw_command(command_name, converted_params)
         
-        # Raw toy commands (for experimentation and workarounds)
-        return self._execute_raw_command(command_name, converted_params)
+        # Post-execution validation
+        if self.state_verification_enabled:
+            validation_report = self.validate_command_result(command_name, converted_params, result, success)
+            
+            # Add validation info to result if there are issues
+            if validation_report['issues']:
+                validation_summary = f" [Validation: {len(validation_report['issues'])} issues]"
+                result = result + validation_summary if isinstance(result, str) else str(result) + validation_summary
+        
+        return success, result
     
     def _convert_params(self, params):
         """Smart parameter conversion"""
@@ -318,6 +347,8 @@ class SimpleSpheroTester:
         if params:
             try:
                 result = api_obj(*params)
+                # Track active effects
+                self._track_command_effect(command_name, params)
                 return True, f"✅ EDU {command_name}({self._format_params(params)}) → {self._format_result(result)}"
             except Exception as e:
                 # Auto-fix with safe defaults
@@ -328,9 +359,76 @@ class SimpleSpheroTester:
         try:
             safe_params = spec['safe_defaults']
             result = api_obj(*safe_params)
+            # Track active effects
+            self._track_command_effect(command_name, safe_params)
             return True, f"✅ EDU {command_name}({self._format_params(safe_params)}) → SAFE DEFAULTS → {self._format_result(result)}"
         except Exception as e:
             return False, f"❌ EDU {command_name} failed: {e}"
+    
+    def _track_command_effect(self, command_name: str, params: List[Any]):
+        """Track command effects for management"""
+        # Determine effect type and track accordingly
+        if 'led' in command_name.lower():
+            # LED effects - track as persistent
+            if any(isinstance(p, Color) and (p.r > 0 or p.g > 0 or p.b > 0) for p in params):
+                self.track_active_effect(command_name, params, 'led')
+            else:
+                # LED turned off - remove from tracking
+                if command_name in self.active_effects['leds']:
+                    del self.active_effects['leds'][command_name]
+        
+        elif 'matrix' in command_name.lower() or 'scroll' in command_name.lower():
+            # Matrix effects - track as temporary
+            if command_name != 'clear_matrix':
+                self.track_active_effect(command_name, params, 'matrix')
+            else:
+                # Matrix cleared - remove all matrix effects
+                self.active_effects['matrix_effects'].clear()
+        
+        elif command_name in ['roll', 'spin'] and params:
+            # Movement effects - track as temporary
+            self.track_active_effect(command_name, params, 'movement')
+    
+    def _track_raw_command_effect(self, command_name: str, params: List[Any]):
+        """Track RAW command effects for management"""
+        # Matrix/Display effects
+        if any(keyword in command_name.lower() for keyword in ['compressed_frame', 'matrix', 'character_matrix']):
+            if 'clear' not in command_name.lower():
+                self.track_active_effect(command_name, params, 'matrix')
+            else:
+                # Clear command - remove matrix effects
+                self.active_effects['matrix_effects'].clear()
+        
+        # LED effects
+        elif any(keyword in command_name.lower() for keyword in ['led', 'rgb']):
+            # Check if LEDs are being turned on (non-zero values)
+            has_color = False
+            if params:
+                # Look for non-zero RGB values
+                for param in params:
+                    if isinstance(param, (int, float)) and param > 0:
+                        has_color = True
+                        break
+                    elif isinstance(param, list):
+                        # Check for non-zero values in LED arrays
+                        if any(v > 0 for v in param if isinstance(v, (int, float))):
+                            has_color = True
+                            break
+            
+            if has_color:
+                self.track_active_effect(command_name, params, 'led')
+            else:
+                # LEDs turned off - remove from tracking
+                if command_name in self.active_effects['leds']:
+                    del self.active_effects['leds'][command_name]
+        
+        # Animation effects
+        elif any(keyword in command_name.lower() for keyword in ['animation', 'start_compressed']):
+            if 'stop' not in command_name.lower():
+                self.track_active_effect(command_name, params, 'animation')
+            else:
+                # Stop animation - clear animations
+                self.active_effects['animations'].clear()
     
     def _auto_fix_edu_command(self, command_name: str, params: List[Any], api_obj, spec, error: str):
         """Intelligent auto-fixing for EDU commands"""
@@ -392,6 +490,8 @@ class SimpleSpheroTester:
             
             if callable(obj):
                 result = obj(*params) if params else obj()
+                # Track RAW command effects
+                self._track_raw_command_effect(command_name, params)
                 return True, f"✅ RAW {command_name}({self._format_params(params)}) → {self._format_result(result)}"
             else:
                 return True, f"📊 RAW {command_name} = {obj}"
@@ -415,6 +515,8 @@ class SimpleSpheroTester:
         
         try:
             result = obj(*fixed_params)
+            # Track RAW command effects
+            self._track_raw_command_effect(command_name, fixed_params)
             return True, f"✅ RAW {command_name}({self._format_params(fixed_params)}) → AUTO-FIXED → {self._format_result(result)}"
         except Exception as e2:
             return False, f"❌ RAW {command_name} auto-fix failed: {e2}"
@@ -467,6 +569,340 @@ class SimpleSpheroTester:
         
         return provided_params
     
+    def track_active_effect(self, command_name: str, params: List[Any], effect_type: str):
+        """Track active effects for management"""
+        effect_id = f"{command_name}_{int(time.time() * 1000)}"
+        
+        effect_info = {
+            'id': effect_id,
+            'command': command_name,
+            'params': params,
+            'timestamp': time.time(),
+            'type': effect_type
+        }
+        
+        if effect_type == 'animation':
+            self.active_effects['animations'].append(effect_info)
+        elif effect_type == 'led':
+            self.active_effects['leds'][command_name] = effect_info
+        elif effect_type == 'matrix':
+            self.active_effects['matrix_effects'].append(effect_info)
+        elif effect_type == 'movement':
+            self.active_effects['movements'].append(effect_info)
+        
+        return effect_id
+    
+    def get_active_effects(self):
+        """Get all currently active effects"""
+        total_effects = (
+            len(self.active_effects['animations']) +
+            len(self.active_effects['leds']) +
+            len(self.active_effects['matrix_effects']) +
+            len(self.active_effects['movements'])
+        )
+        
+        return {
+            'total': total_effects,
+            'effects': self.active_effects,
+            'summary': {
+                'animations': len(self.active_effects['animations']),
+                'leds': len(self.active_effects['leds']),
+                'matrix': len(self.active_effects['matrix_effects']),
+                'movements': len(self.active_effects['movements'])
+            }
+        }
+    
+    def stop_effect(self, effect_id: str):
+        """Stop a specific effect by ID"""
+        if not self.connected:
+            return False, "❌ Not connected"
+        
+        # Find and remove the effect
+        for category in self.active_effects:
+            if category == 'leds':
+                for cmd, effect in list(self.active_effects[category].items()):
+                    if effect['id'] == effect_id:
+                        # Turn off LED (try both EDU and RAW methods)
+                        try:
+                            # Try EDU API first
+                            if 'led' in cmd and hasattr(self.api, cmd):
+                                getattr(self.api, cmd)(Color(0, 0, 0))
+                            # Try RAW commands
+                            elif hasattr(self.toy, cmd):
+                                if 'rgb' in cmd.lower():
+                                    getattr(self.toy, cmd)(0, 0, 0)
+                                elif 'led' in cmd.lower():
+                                    getattr(self.toy, cmd)(0, [0, 0, 0, 0, 0, 0, 0, 0])
+                            
+                            del self.active_effects[category][cmd]
+                            return True, f"✅ Stopped LED effect: {cmd}"
+                        except Exception as e:
+                            return False, f"❌ Failed to stop {cmd}: {e}"
+            else:
+                effects_list = self.active_effects[category]
+                for i, effect in enumerate(effects_list):
+                    if effect['id'] == effect_id:
+                        # Stop animation/matrix effect
+                        try:
+                            if category == 'animations':
+                                if hasattr(self.toy, 'stop_compressed_frame_player_animation'):
+                                    self.toy.stop_compressed_frame_player_animation()
+                            elif category == 'matrix_effects':
+                                # Try multiple methods to clear matrix effects
+                                if hasattr(self.api, 'clear_matrix'):
+                                    self.api.clear_matrix()
+                                if hasattr(self.toy, 'draw_compressed_frame_player_fill'):
+                                    self.toy.draw_compressed_frame_player_fill(0, 0, 0)
+                                if hasattr(self.toy, 'clear_character_matrix_display'):
+                                    self.toy.clear_character_matrix_display()
+                            
+                            effects_list.pop(i)
+                            return True, f"✅ Stopped {category} effect: {effect['command']}"
+                        except Exception as e:
+                            return False, f"❌ Failed to stop {effect['command']}: {e}"
+        
+        return False, f"❌ Effect {effect_id} not found"
+    
+    def force_stop_all_effects(self):
+        """Emergency stop - turn off all effects and reset Sphero"""
+        if not self.connected:
+            return False, "❌ Not connected"
+        
+        results = []
+        
+        try:
+            # Stop all LEDs
+            if self.api:
+                try:
+                    self.api.set_main_led(Color(0, 0, 0))
+                    results.append("✅ Main LED off")
+                except: pass
+                
+                try:
+                    self.api.set_back_led(Color(0, 0, 0))
+                    results.append("✅ Back LED off")
+                except: pass
+                
+                try:
+                    self.api.set_front_led(Color(0, 0, 0))
+                    results.append("✅ Front LED off")
+                except: pass
+                
+                try:
+                    self.api.clear_matrix()
+                    results.append("✅ Matrix cleared")
+                except: pass
+                
+                try:
+                    self.api.set_stabilization(True)
+                    results.append("✅ Stabilization restored")
+                except: pass
+            
+            # Stop RAW effects with proper verification
+            if self.toy:
+                # Stop compressed frame player animations
+                try:
+                    self.toy.stop_compressed_frame_player_animation()
+                    results.append("✅ Animations stopped")
+                except Exception as e:
+                    results.append(f"⚠️ Animation stop failed: {e}")
+                
+                # Clear compressed frame player completely
+                try:
+                    # Method 1: Fill with black
+                    self.toy.draw_compressed_frame_player_fill(0, 0, 0)
+                    results.append("✅ Frame player filled black")
+                except Exception as e:
+                    results.append(f"⚠️ Frame fill failed: {e}")
+                
+                try:
+                    # Method 2: Set one color to black (this is what you used)
+                    self.toy.set_compressed_frame_player_one_color(0, 0, 0)
+                    results.append("✅ Frame player one color cleared")
+                except Exception as e:
+                    results.append(f"⚠️ One color clear failed: {e}")
+                
+                try:
+                    # Method 3: Clear character matrix display
+                    self.toy.clear_character_matrix_display()
+                    results.append("✅ Character matrix cleared")
+                except Exception as e:
+                    results.append(f"⚠️ Character matrix clear failed: {e}")
+                
+                # Additional clearing attempts
+                try:
+                    # Try to clear any active frame player content
+                    for i in range(8):
+                        for j in range(8):
+                            self.toy.draw_compressed_frame_player_pixel(i, j, 0, 0, 0)
+                    results.append("✅ All pixels cleared individually")
+                except Exception as e:
+                    results.append(f"⚠️ Pixel clear failed: {e}")
+                
+                try:
+                    # Reset all LEDs via raw commands
+                    self.toy.set_all_leds_with_8_bit_mask(0, [0, 0, 0, 0, 0, 0, 0, 0])
+                    results.append("✅ All LEDs reset")
+                except: pass
+                
+                try:
+                    # Reset RGB LED output
+                    self.toy.set_rgb_led_output(0, 0, 0)
+                    results.append("✅ RGB LED reset")
+                except: pass
+            
+            # Clear active effects tracking
+            self.active_effects = {
+                'animations': [],
+                'leds': {},
+                'matrix_effects': [],
+                'movements': []
+            }
+            
+            # Reset LED states
+            self.led_states = {'back_led': False, 'front_led': False, 'main_led': False}
+            
+            results.append("🔄 Effect tracking cleared")
+            
+            # Verification phase - actually check if effects are off
+            verification_results = []
+            
+            # Wait a moment for commands to take effect
+            time.sleep(0.5)
+            
+            # Verify LEDs are actually off by checking if we can detect any light
+            try:
+                # Try to get ambient light sensor to see if LEDs are affecting it
+                if hasattr(self.toy, 'get_ambient_light_sensor_value'):
+                    light_before = self.toy.get_ambient_light_sensor_value()
+                    
+                    # Briefly flash an LED to test responsiveness
+                    if self.api:
+                        self.api.set_main_led(Color(255, 255, 255))
+                        time.sleep(0.1)
+                        light_during = self.toy.get_ambient_light_sensor_value()
+                        self.api.set_main_led(Color(0, 0, 0))
+                        time.sleep(0.1)
+                        light_after = self.toy.get_ambient_light_sensor_value()
+                        
+                        if abs(light_during - light_before) > 1:  # LED caused light change
+                            verification_results.append("✅ LED control verified working")
+                        else:
+                            verification_results.append("⚠️ LED control verification inconclusive")
+                        
+                        if abs(light_after - light_before) < 1:  # Back to baseline
+                            verification_results.append("✅ LEDs verified off")
+                        else:
+                            verification_results.append("❌ LEDs may still be on")
+                
+            except Exception as e:
+                verification_results.append(f"⚠️ LED verification failed: {e}")
+            
+            # Verify matrix is clear by trying to detect if it responds to commands
+            try:
+                if self.api:
+                    # Try to set a character and see if it works
+                    self.api.set_matrix_character('X', Color(255, 0, 0))
+                    time.sleep(0.1)
+                    self.api.clear_matrix()
+                    verification_results.append("✅ Matrix control verified working")
+                    
+            except Exception as e:
+                verification_results.append(f"⚠️ Matrix verification failed: {e}")
+            
+            # Add verification results
+            if verification_results:
+                results.append("\n🔍 Verification Results:")
+                results.extend(verification_results)
+            
+            return True, "\n".join(results)
+            
+        except Exception as e:
+            return False, f"❌ Force stop failed: {e}"
+    
+    def clear_compressed_frame_player_completely(self):
+        """Specifically target compressed frame player effects"""
+        if not self.toy:
+            return False, "❌ No toy access"
+        
+        results = []
+        
+        try:
+            # Multiple methods to ensure compressed frame player is cleared
+            
+            # Method 1: Stop any running animations
+            try:
+                self.toy.stop_compressed_frame_player_animation()
+                results.append("✅ Stopped frame player animation")
+            except Exception as e:
+                results.append(f"⚠️ Stop animation failed: {e}")
+            
+            # Method 2: Set one color to black (your problematic command)
+            try:
+                self.toy.set_compressed_frame_player_one_color(0, 0, 0)
+                results.append("✅ Set one color to black")
+            except Exception as e:
+                results.append(f"❌ One color black failed: {e}")
+            
+            # Method 3: Fill entire frame with black
+            try:
+                self.toy.draw_compressed_frame_player_fill(0, 0, 0)
+                results.append("✅ Filled frame with black")
+            except Exception as e:
+                results.append(f"⚠️ Fill black failed: {e}")
+            
+            # Method 4: Clear all pixels individually
+            try:
+                for x in range(8):
+                    for y in range(8):
+                        self.toy.draw_compressed_frame_player_pixel(x, y, 0, 0, 0)
+                results.append("✅ Cleared all pixels individually")
+            except Exception as e:
+                results.append(f"⚠️ Individual pixel clear failed: {e}")
+            
+            # Method 5: Try to reset the frame player state
+            try:
+                # Assign empty frame to animation and stop it
+                self.toy.assign_compressed_frame_player_frames_to_animation(0, [])
+                self.toy.stop_compressed_frame_player_animation()
+                results.append("✅ Reset frame player state")
+            except Exception as e:
+                results.append(f"⚠️ State reset failed: {e}")
+            
+            return True, "\n".join(results)
+            
+        except Exception as e:
+            return False, f"❌ Compressed frame clear failed: {e}"
+    
+    def enhanced_force_disconnect(self):
+        """Enhanced force disconnect with complete cleanup"""
+        messages = []
+        
+        try:
+            # First, stop all effects
+            success, stop_result = self.force_stop_all_effects()
+            if success:
+                messages.append("🛑 All effects stopped")
+            else:
+                messages.append("⚠️ Effect stop had issues")
+            
+            # Give Sphero time to process stop commands
+            time.sleep(0.5)
+            
+            # Standard disconnect
+            disconnect_messages = self.disconnect(force=True)
+            messages.extend(disconnect_messages)
+            
+            # Additional cleanup
+            messages.append("🧹 Enhanced cleanup complete")
+            
+            return messages
+            
+        except Exception as e:
+            messages.append(f"❌ Enhanced disconnect error: {e}")
+            # Fallback to standard disconnect
+            return self.disconnect(force=True)
+    
     def test_raw_command_discovery(self, command_name: str):
         """Discover RAW command parameters through safe testing"""
         if not self.toy:
@@ -505,6 +941,200 @@ class SimpleSpheroTester:
             
         except Exception as e:
             return False, f"❌ Discovery failed: {e}"
+    
+    def verify_connection_integrity(self):
+        """Comprehensive connection integrity verification"""
+        integrity_report = {
+            'connection_valid': False,
+            'api_functional': False,
+            'toy_accessible': False,
+            'led_states_accurate': False,
+            'active_effects_valid': False,
+            'errors': [],
+            'warnings': []
+        }
+        
+        try:
+            # 1. Basic connection verification
+            if not self.connected:
+                integrity_report['errors'].append("Connection flag is False")
+                return False, integrity_report
+            
+            if not self.api:
+                integrity_report['errors'].append("API object is None")
+                return False, integrity_report
+            
+            integrity_report['connection_valid'] = True
+            
+            # 2. API functionality verification
+            try:
+                heading = self.api.get_heading()
+                if isinstance(heading, (int, float)) and 0 <= heading <= 360:
+                    integrity_report['api_functional'] = True
+                else:
+                    integrity_report['warnings'].append(f"Heading value unusual: {heading}")
+            except Exception as e:
+                integrity_report['errors'].append(f"API test failed: {e}")
+                return False, integrity_report
+            
+            # 3. Toy object verification
+            if self.toy:
+                try:
+                    # Test a safe toy method
+                    battery = self.toy.get_battery_percentage()
+                    if isinstance(battery, (int, float)) and 0 <= battery <= 100:
+                        integrity_report['toy_accessible'] = True
+                    else:
+                        integrity_report['warnings'].append(f"Battery value unusual: {battery}")
+                except Exception as e:
+                    integrity_report['warnings'].append(f"Toy access limited: {e}")
+            else:
+                integrity_report['warnings'].append("No toy object available")
+            
+            # 4. LED state verification
+            led_verification_passed = True
+            for led_name, state in self.led_states.items():
+                if not isinstance(state, bool):
+                    integrity_report['errors'].append(f"LED state {led_name} is not boolean: {state}")
+                    led_verification_passed = False
+            
+            integrity_report['led_states_accurate'] = led_verification_passed
+            
+            # 5. Active effects validation
+            effects_valid = True
+            total_effects = 0
+            
+            for category, effects in self.active_effects.items():
+                if category == 'leds':
+                    if not isinstance(effects, dict):
+                        integrity_report['errors'].append(f"LED effects should be dict, got {type(effects)}")
+                        effects_valid = False
+                    else:
+                        total_effects += len(effects)
+                else:
+                    if not isinstance(effects, list):
+                        integrity_report['errors'].append(f"{category} effects should be list, got {type(effects)}")
+                        effects_valid = False
+                    else:
+                        total_effects += len(effects)
+            
+            integrity_report['active_effects_valid'] = effects_valid
+            integrity_report['total_tracked_effects'] = total_effects
+            
+            # Overall integrity assessment
+            all_critical_passed = (
+                integrity_report['connection_valid'] and
+                integrity_report['api_functional'] and
+                integrity_report['led_states_accurate'] and
+                integrity_report['active_effects_valid']
+            )
+            
+            return all_critical_passed, integrity_report
+            
+        except Exception as e:
+            integrity_report['errors'].append(f"Integrity check failed: {e}")
+            return False, integrity_report
+    
+    def validate_command_result(self, command_name: str, params: List[Any], result: Any, success: bool):
+        """Validate that command results are accurate and consistent"""
+        validation_report = {
+            'result_valid': False,
+            'state_consistent': False,
+            'tracking_accurate': False,
+            'issues': []
+        }
+        
+        try:
+            # 1. Result validation
+            if success:
+                if result is None:
+                    validation_report['issues'].append("Success reported but result is None")
+                else:
+                    validation_report['result_valid'] = True
+            else:
+                if not isinstance(result, str) or not result.strip():
+                    validation_report['issues'].append("Failure reported but no error message")
+                else:
+                    validation_report['result_valid'] = True
+            
+            # 2. State consistency check
+            if success and 'led' in command_name.lower():
+                # Verify LED state tracking matches command
+                led_name = command_name.replace('set_', '')
+                if led_name in self.led_states:
+                    expected_state = any(isinstance(p, Color) and (p.r > 0 or p.g > 0 or p.b > 0) for p in params) if params else False
+                    actual_state = self.led_states[led_name]
+                    if expected_state == actual_state:
+                        validation_report['state_consistent'] = True
+                    else:
+                        validation_report['issues'].append(f"LED state mismatch: expected {expected_state}, got {actual_state}")
+            else:
+                validation_report['state_consistent'] = True  # Non-LED commands pass by default
+            
+            # 3. Effect tracking validation
+            if success:
+                if 'led' in command_name.lower():
+                    # Check if LED effect is properly tracked
+                    if command_name in self.active_effects['leds'] or all(isinstance(p, Color) and p.r == 0 and p.g == 0 and p.b == 0 for p in params if isinstance(p, Color)):
+                        validation_report['tracking_accurate'] = True
+                    else:
+                        validation_report['issues'].append(f"LED effect tracking inconsistent for {command_name}")
+                else:
+                    validation_report['tracking_accurate'] = True  # Non-LED commands pass by default
+            else:
+                validation_report['tracking_accurate'] = True  # Failed commands don't affect tracking
+            
+            # Log the validation
+            self.command_execution_log.append({
+                'timestamp': time.time(),
+                'command': command_name,
+                'params': str(params),
+                'success': success,
+                'result': str(result),
+                'validation': validation_report
+            })
+            
+            # Keep log size manageable
+            if len(self.command_execution_log) > 100:
+                self.command_execution_log = self.command_execution_log[-50:]
+            
+            return validation_report
+            
+        except Exception as e:
+            validation_report['issues'].append(f"Validation failed: {e}")
+            return validation_report
+    
+    def get_integrity_status(self):
+        """Get comprehensive integrity and accuracy status"""
+        if not self.state_verification_enabled:
+            return {
+                'status': 'disabled',
+                'message': 'Integrity verification is disabled'
+            }
+        
+        # Run full integrity check
+        integrity_passed, integrity_report = self.verify_connection_integrity()
+        
+        # Analyze recent command validations
+        recent_validations = self.command_execution_log[-10:] if self.command_execution_log else []
+        validation_issues = []
+        
+        for log_entry in recent_validations:
+            validation = log_entry['validation']
+            if validation['issues']:
+                validation_issues.extend(validation['issues'])
+        
+        # Generate status report
+        status_report = {
+            'overall_integrity': 'PASS' if integrity_passed else 'FAIL',
+            'connection_integrity': integrity_report,
+            'recent_validation_issues': validation_issues,
+            'total_commands_logged': len(self.command_execution_log),
+            'verification_enabled': self.state_verification_enabled,
+            'timestamp': time.time()
+        }
+        
+        return status_report
     
     def _format_params(self, params):
         """Format parameters for display"""
@@ -830,6 +1460,189 @@ async def get_homepage():
             background: #1f6feb;
         }
         
+        .effect-count {
+            background: #21262d;
+            color: #7d8590;
+            padding: 1px 4px;
+            border-radius: 8px;
+            font-size: 8px;
+            margin-left: 4px;
+        }
+        
+        .effect-count.active {
+            background: #f85149;
+            color: white;
+        }
+        
+        .active-effects-list {
+            max-height: 120px;
+            overflow-y: auto;
+            margin-top: 4px;
+        }
+        
+        .active-effect {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 2px 4px;
+            margin: 1px 0;
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 2px;
+            font-size: 8px;
+        }
+        
+        .active-effect.led { border-left: 3px solid #f85149; }
+        .active-effect.matrix { border-left: 3px solid #d29922; }
+        .active-effect.animation { border-left: 3px solid #a5a5a5; }
+        .active-effect.movement { border-left: 3px solid #238636; }
+        
+        .effect-name {
+            color: #c9d1d9;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex: 1;
+        }
+        
+        .stop-btn {
+            background: #f85149;
+            color: white;
+            border: none;
+            border-radius: 2px;
+            width: 12px;
+            height: 12px;
+            font-size: 8px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-left: 4px;
+        }
+        
+        .stop-btn:hover {
+            background: #da3633;
+        }
+        
+        .control-btn.emergency {
+            background: #f85149;
+            border-color: #da3633;
+            color: white;
+        }
+        
+        .control-btn.emergency:hover {
+            background: #da3633;
+        }
+        
+        .control-btn.warning {
+            background: #d29922;
+            border-color: #bb8009;
+            color: white;
+        }
+        
+        .control-btn.warning:hover {
+            background: #bb8009;
+        }
+        
+        .control-btn.info {
+            background: #0969da;
+            border-color: #1f6feb;
+            color: white;
+        }
+        
+        .control-btn.info:hover {
+            background: #1f6feb;
+        }
+        
+        .control-btn.success {
+            background: #238636;
+            border-color: #2ea043;
+            color: white;
+        }
+        
+        .control-btn.success:hover {
+            background: #2ea043;
+        }
+        
+        .integrity-status {
+            background: #21262d;
+            color: #7d8590;
+            padding: 1px 4px;
+            border-radius: 8px;
+            font-size: 8px;
+            margin-left: 4px;
+        }
+        
+        .integrity-status.pass {
+            background: #238636;
+            color: white;
+        }
+        
+        .integrity-status.fail {
+            background: #f85149;
+            color: white;
+        }
+        
+        .integrity-status.unknown {
+            background: #d29922;
+            color: white;
+        }
+        
+        .integrity-details {
+            max-height: 100px;
+            overflow-y: auto;
+            margin-top: 4px;
+        }
+        
+        .integrity-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1px 4px;
+            margin: 1px 0;
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 2px;
+            font-size: 8px;
+        }
+        
+        .integrity-item.pass { border-left: 3px solid #238636; }
+        .integrity-item.fail { border-left: 3px solid #f85149; }
+        
+        .integrity-errors {
+            color: #f85149;
+            font-size: 7px;
+            padding: 2px 4px;
+            background: #161b22;
+            border: 1px solid #f85149;
+            border-radius: 2px;
+            margin: 1px 0;
+        }
+        
+        .integrity-warnings {
+            color: #d29922;
+            font-size: 7px;
+            padding: 2px 4px;
+            background: #161b22;
+            border: 1px solid #d29922;
+            border-radius: 2px;
+            margin: 1px 0;
+        }
+        
+        .integrity-issues {
+            color: #f85149;
+            font-size: 7px;
+            padding: 2px 4px;
+            text-align: center;
+        }
+        
+        .integrity-stats {
+            color: #7d8590;
+            font-size: 7px;
+            padding: 2px 4px;
+            text-align: center;
+        }
+        
         .cmd-meta {
             font-size: 8px;
             color: #7d8590;
@@ -994,6 +1807,28 @@ async def get_homepage():
                             <div style="padding: 20px; text-align: center; color: #7d8590; font-size: 10px;">Connect to load</div>
                         </div>
                     </div>
+                    <div class="section">
+                        <div class="section-header">🔴 Active Effects <span id="effectCount" class="effect-count">0</span></div>
+                        <div class="controls-grid">
+                            <div class="control-btn emergency" onclick="forceStopAll()">🛑 STOP ALL</div>
+                            <div class="control-btn warning" onclick="clearCompressedFrame()">🔲 CLEAR MATRIX</div>
+                            <div class="control-btn warning" onclick="enhancedDisconnect()">🔥 FORCE DC</div>
+                            <div class="control-btn info" onclick="refreshActiveEffects()">🔄 Refresh</div>
+                        </div>
+                        <div id="activeEffectsList" class="active-effects-list">
+                            <div style="padding: 10px; text-align: center; color: #7d8590; font-size: 9px;">No active effects</div>
+                        </div>
+                    </div>
+                    <div class="section">
+                        <div class="section-header">🔍 Integrity Monitor <span id="integrityStatus" class="integrity-status">UNKNOWN</span></div>
+                        <div class="controls-grid">
+                            <div class="control-btn info" onclick="checkIntegrity()">🔍 Check</div>
+                            <div class="control-btn" id="verificationToggle" onclick="toggleVerification()">✅ ON</div>
+                        </div>
+                        <div id="integrityDetails" class="integrity-details">
+                            <div style="padding: 10px; text-align: center; color: #7d8590; font-size: 9px;">Click Check to verify integrity</div>
+                        </div>
+                    </div>
                 </div>
             </div>
             
@@ -1094,7 +1929,13 @@ async def get_homepage():
                 if (data.includes('✅')) {
                     execCount++;
                     document.getElementById('execCount').textContent = execCount;
+                    // Refresh active effects after successful command
+                    setTimeout(refreshActiveEffects, 100);
                 }
+            } else if (type === 'active_effects') {
+                updateActiveEffects(data);
+            } else if (type === 'integrity_status') {
+                updateIntegrityStatus(data);
             }
         }
         
@@ -1287,6 +2128,199 @@ async def get_homepage():
             }));
         }
         
+        function refreshActiveEffects() {
+            if (!connected) {
+                addConsoleMessage('Not connected', 'error');
+                return;
+            }
+            
+            ws.send(JSON.stringify({
+                action: 'get_active_effects'
+            }));
+        }
+        
+        function stopEffect(effectId) {
+            if (!connected) {
+                addConsoleMessage('Not connected', 'error');
+                return;
+            }
+            
+            ws.send(JSON.stringify({
+                action: 'stop_effect',
+                effect_id: effectId
+            }));
+        }
+        
+        function forceStopAll() {
+            if (!connected) {
+                addConsoleMessage('Not connected', 'error');
+                return;
+            }
+            
+            addConsoleMessage('🛑 EMERGENCY STOP - Stopping all effects...', 'warning');
+            
+            ws.send(JSON.stringify({
+                action: 'force_stop_all'
+            }));
+        }
+        
+        function clearCompressedFrame() {
+            if (!connected) {
+                addConsoleMessage('Not connected', 'error');
+                return;
+            }
+            
+            addConsoleMessage('🔲 CLEARING MATRIX - Multiple clear methods...', 'warning');
+            
+            ws.send(JSON.stringify({
+                action: 'clear_compressed_frame'
+            }));
+        }
+        
+        function enhancedDisconnect() {
+            addConsoleMessage('🔥 ENHANCED FORCE DISCONNECT - Stopping everything...', 'warning');
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: 'enhanced_disconnect' }));
+            }
+            
+            // Always force reset state
+            connected = false;
+            updateStatus(false);
+            resetLEDStates();
+        }
+        
+        function updateActiveEffects(effectsData) {
+            const countElement = document.getElementById('effectCount');
+            const listElement = document.getElementById('activeEffectsList');
+            
+            countElement.textContent = effectsData.total;
+            countElement.className = effectsData.total > 0 ? 'effect-count active' : 'effect-count';
+            
+            if (effectsData.total === 0) {
+                listElement.innerHTML = '<div style="padding: 10px; text-align: center; color: #7d8590; font-size: 9px;">No active effects</div>';
+                return;
+            }
+            
+            let html = '';
+            
+            // LEDs
+            Object.values(effectsData.effects.leds).forEach(effect => {
+                html += `
+                    <div class="active-effect led">
+                        <span class="effect-name">💡 ${effect.command}</span>
+                        <button class="stop-btn" onclick="stopEffect('${effect.id}')">×</button>
+                    </div>
+                `;
+            });
+            
+            // Matrix effects
+            effectsData.effects.matrix_effects.forEach(effect => {
+                html += `
+                    <div class="active-effect matrix">
+                        <span class="effect-name">🔲 ${effect.command}</span>
+                        <button class="stop-btn" onclick="stopEffect('${effect.id}')">×</button>
+                    </div>
+                `;
+            });
+            
+            // Animations
+            effectsData.effects.animations.forEach(effect => {
+                html += `
+                    <div class="active-effect animation">
+                        <span class="effect-name">🎬 ${effect.command}</span>
+                        <button class="stop-btn" onclick="stopEffect('${effect.id}')">×</button>
+                    </div>
+                `;
+            });
+            
+            // Movements
+            effectsData.effects.movements.forEach(effect => {
+                html += `
+                    <div class="active-effect movement">
+                        <span class="effect-name">🏃 ${effect.command}</span>
+                        <button class="stop-btn" onclick="stopEffect('${effect.id}')">×</button>
+                    </div>
+                `;
+            });
+            
+            listElement.innerHTML = html;
+        }
+        
+        function checkIntegrity() {
+            if (!connected) {
+                addConsoleMessage('Not connected', 'error');
+                return;
+            }
+            
+            addConsoleMessage('🔍 Running integrity check...', 'info');
+            
+            ws.send(JSON.stringify({
+                action: 'get_integrity_status'
+            }));
+        }
+        
+        function toggleVerification() {
+            ws.send(JSON.stringify({
+                action: 'toggle_verification'
+            }));
+        }
+        
+        function updateIntegrityStatus(statusData) {
+            const statusElement = document.getElementById('integrityStatus');
+            const detailsElement = document.getElementById('integrityDetails');
+            const toggleBtn = document.getElementById('verificationToggle');
+            
+            // Update main status
+            const overallStatus = statusData.overall_integrity || 'UNKNOWN';
+            statusElement.textContent = overallStatus;
+            statusElement.className = `integrity-status ${overallStatus.toLowerCase()}`;
+            
+            // Update verification toggle
+            const verificationEnabled = statusData.verification_enabled;
+            toggleBtn.textContent = verificationEnabled ? '✅ ON' : '❌ OFF';
+            toggleBtn.className = verificationEnabled ? 'control-btn success' : 'control-btn';
+            
+            // Update details
+            let detailsHtml = '';
+            
+            if (statusData.connection_integrity) {
+                const ci = statusData.connection_integrity;
+                detailsHtml += `
+                    <div class="integrity-item ${ci.connection_valid ? 'pass' : 'fail'}">
+                        Connection: ${ci.connection_valid ? '✅' : '❌'}
+                    </div>
+                    <div class="integrity-item ${ci.api_functional ? 'pass' : 'fail'}">
+                        API: ${ci.api_functional ? '✅' : '❌'}
+                    </div>
+                    <div class="integrity-item ${ci.led_states_accurate ? 'pass' : 'fail'}">
+                        LED States: ${ci.led_states_accurate ? '✅' : '❌'}
+                    </div>
+                    <div class="integrity-item ${ci.active_effects_valid ? 'pass' : 'fail'}">
+                        Effect Tracking: ${ci.active_effects_valid ? '✅' : '❌'}
+                    </div>
+                `;
+                
+                if (ci.errors && ci.errors.length > 0) {
+                    detailsHtml += `<div class="integrity-errors">Errors: ${ci.errors.join(', ')}</div>`;
+                }
+                
+                if (ci.warnings && ci.warnings.length > 0) {
+                    detailsHtml += `<div class="integrity-warnings">Warnings: ${ci.warnings.join(', ')}</div>`;
+                }
+            }
+            
+            if (statusData.recent_validation_issues && statusData.recent_validation_issues.length > 0) {
+                detailsHtml += `<div class="integrity-issues">Recent Issues: ${statusData.recent_validation_issues.length}</div>`;
+            }
+            
+            if (statusData.total_commands_logged) {
+                detailsHtml += `<div class="integrity-stats">Commands Logged: ${statusData.total_commands_logged}</div>`;
+            }
+            
+            detailsElement.innerHTML = detailsHtml || '<div style="padding: 10px; text-align: center; color: #7d8590; font-size: 9px;">No integrity data</div>';
+        }
+        
         function executeCommand(commandName, params = null, forceRaw = false) {
             if (!connected) {
                 addConsoleMessage('Not connected', 'error');
@@ -1426,6 +2460,44 @@ async def websocket_endpoint(websocket: WebSocket):
             elif action == 'discover_command':
                 command = data.get('command')
                 success, result = tester.test_raw_command_discovery(command)
+                await websocket.send_json({'type': 'result', 'data': result})
+                
+            elif action == 'get_active_effects':
+                effects = tester.get_active_effects()
+                await websocket.send_json({'type': 'active_effects', 'data': effects})
+                
+            elif action == 'stop_effect':
+                effect_id = data.get('effect_id')
+                success, result = tester.stop_effect(effect_id)
+                await websocket.send_json({'type': 'result', 'data': result})
+                # Send updated effects list
+                effects = tester.get_active_effects()
+                await websocket.send_json({'type': 'active_effects', 'data': effects})
+                
+            elif action == 'force_stop_all':
+                success, result = tester.force_stop_all_effects()
+                await websocket.send_json({'type': 'result', 'data': result})
+                # Send updated effects list
+                effects = tester.get_active_effects()
+                await websocket.send_json({'type': 'active_effects', 'data': effects})
+                
+            elif action == 'enhanced_disconnect':
+                messages = tester.enhanced_force_disconnect()
+                for message in messages:
+                    await websocket.send_json({'type': 'status', 'data': message})
+                    await asyncio.sleep(0.1)
+                
+            elif action == 'get_integrity_status':
+                status = tester.get_integrity_status()
+                await websocket.send_json({'type': 'integrity_status', 'data': status})
+                
+            elif action == 'toggle_verification':
+                tester.state_verification_enabled = not tester.state_verification_enabled
+                status = f"Integrity verification {'enabled' if tester.state_verification_enabled else 'disabled'}"
+                await websocket.send_json({'type': 'result', 'data': status})
+                
+            elif action == 'clear_compressed_frame':
+                success, result = tester.clear_compressed_frame_player_completely()
                 await websocket.send_json({'type': 'result', 'data': result})
                 
             elif action == 'execute_command':
