@@ -21,9 +21,35 @@ class SimpleSpheroTester:
         self.api = None
         self.connected = False
         self.websocket = None
-        self.commands_cache = []
-        self.working_led_method = None
-        self.working_matrix_method = None
+        self.edu_commands = []
+        self.raw_commands = []
+        self.led_states = {'back_led': False, 'front_led': False, 'main_led': False}
+        
+        # EDU API command definitions with safe defaults
+        self.edu_api_specs = {
+            'set_back_led': {'params': ['Color'], 'safe_defaults': [Color(255, 0, 0)]},
+            'set_front_led': {'params': ['Color'], 'safe_defaults': [Color(0, 255, 0)]},
+            'set_main_led': {'params': ['Color'], 'safe_defaults': [Color(0, 0, 255)]},
+            'spin': {'params': ['degrees', 'speed'], 'safe_defaults': [360, 1]},
+            'roll': {'params': ['heading', 'speed', 'duration'], 'safe_defaults': [0, 50, 1]},
+            'get_heading': {'params': [], 'safe_defaults': []},
+            'get_acceleration': {'params': [], 'safe_defaults': []},
+            'get_gyroscope': {'params': [], 'safe_defaults': []},
+            'scroll_matrix_text': {'params': ['text', 'Color'], 'safe_defaults': ['HI', Color(255, 255, 0)]},
+            'set_matrix_character': {'params': ['char', 'Color'], 'safe_defaults': ['A', Color(0, 255, 255)]},
+            'clear_matrix': {'params': [], 'safe_defaults': []},
+            'set_stabilization': {'params': ['enabled'], 'safe_defaults': [True]},
+        }
+        
+        # Matrix/LED workaround attempts using raw commands
+        self.matrix_workarounds = [
+            'set_all_leds_with_8_bit_mask',
+            'draw_compressed_frame_player_fill',
+            'draw_compressed_frame_player_line',
+            'set_compressed_frame_player_one_color',
+            'assign_compressed_frame_player_frames_to_animation',
+            'LEDs'  # Direct LED object access
+        ]
     
     def wait_for_full_wake(self, wait_seconds=3):
         """Wait for full initialization - EXACT api.py method"""
@@ -139,27 +165,42 @@ class SimpleSpheroTester:
         return False, messages + ["❌ Failed after all attempts"]
     
     def cache_commands(self):
-        """Cache all available commands"""
-        if not self.toy:
-            return
+        """Cache EDU and raw commands separately"""
+        # EDU API commands
+        self.edu_commands = []
+        if self.api:
+            for cmd_name, spec in self.edu_api_specs.items():
+                if hasattr(self.api, cmd_name):
+                    self.edu_commands.append({
+                        'name': cmd_name,
+                        'type': 'edu_method',
+                        'params': spec['params'],
+                        'defaults': spec['safe_defaults'],
+                        'category': self.categorize_command(cmd_name),
+                        'working': cmd_name in ['set_back_led', 'set_front_led', 'spin', 'roll', 'get_heading']
+                    })
         
-        attrs = [a for a in dir(self.toy) if not a.startswith('_')]
+        # Raw toy commands
+        self.raw_commands = []
+        if self.toy:
+            attrs = [a for a in dir(self.toy) if not a.startswith('_')]
+            for attr in attrs:
+                try:
+                    obj = getattr(self.toy, attr)
+                    # Skip if this is covered by EDU API
+                    is_edu_duplicate = attr in self.edu_api_specs
+                    
+                    self.raw_commands.append({
+                        'name': attr,
+                        'type': 'raw_method' if callable(obj) else 'raw_property',
+                        'category': self.categorize_command(attr),
+                        'is_workaround': attr in self.matrix_workarounds,
+                        'edu_duplicate': is_edu_duplicate
+                    })
+                except:
+                    pass
         
-        commands = []
-        for attr in attrs:
-            try:
-                obj = getattr(self.toy, attr)
-                cmd_info = {
-                    'name': attr,
-                    'type': 'method' if callable(obj) else 'property',
-                    'doc': getattr(obj, '__doc__', None) or 'No documentation',
-                    'category': self.categorize_command(attr)
-                }
-                commands.append(cmd_info)
-            except:
-                pass
-        
-        self.commands_cache = sorted(commands, key=lambda x: (x['category'], x['name']))
+        self.raw_commands = sorted(self.raw_commands, key=lambda x: (x['category'], x['name']))
     
     def categorize_command(self, name: str) -> str:
         """Categorize commands"""
@@ -184,99 +225,181 @@ class SimpleSpheroTester:
         else:
             return 'Other'
     
-    def execute_command(self, command_name: str, params: List[Any] = None):
-        """Execute a command - try API first for known working commands"""
+    def execute_command(self, command_name: str, params: List[Any] = None, force_raw: bool = False):
+        """Intelligent command execution with auto-solving"""
         if not self.connected:
-            return False, "❌ Not connected to Sphero"
+            return False, "❌ Not connected"
         
-        # Convert parameters first
-        converted_params = []
-        if params:
-            for param in params:
-                if isinstance(param, str) and param.strip():
-                    try:
-                        if '.' in param:
-                            converted_params.append(float(param))
-                        else:
-                            converted_params.append(int(param))
-                    except ValueError:
-                        if ',' in param:
-                            try:
-                                rgb_values = [int(x.strip()) for x in param.split(',')]
-                                if len(rgb_values) == 3:
-                                    converted_params.append(Color(*rgb_values))
-                                    continue
-                            except:
-                                pass
-                        converted_params.append(param)
-                else:
-                    converted_params.append(param)
+        # Convert parameters
+        converted_params = self._convert_params(params) if params else []
         
-        # Known working commands - try API first
-        api_commands = ['set_back_led', 'set_front_led', 'set_main_led', 'spin', 'roll', 
-                       'get_heading', 'get_acceleration', 'get_gyroscope', 'scroll_matrix_text', 
-                       'set_matrix_character', 'clear_matrix']
+        # EDU API commands (try first with intelligent auto-fixing)
+        if not force_raw and command_name in self.edu_api_specs:
+            return self._execute_edu_command(command_name, converted_params)
         
-        if command_name in api_commands and self.api and hasattr(self.api, command_name):
-            try:
-                api_obj = getattr(self.api, command_name)
-                if callable(api_obj):
-                    if converted_params:
-                        result = api_obj(*converted_params)
-                    else:
-                        result = api_obj()
-                    return True, f"✅ API {command_name}() executed successfully. Result: {result}"
-                else:
-                    return True, f"API {command_name} = {api_obj}"
-            except Exception as e:
-                # If API fails, try low-level as fallback
-                pass
-        
-        # Try low-level toy object (for experimentation)
-        if self.toy:
-            try:
-                obj = getattr(self.toy, command_name)
-                
-                if callable(obj):
-                    if converted_params:
-                        result = obj(*converted_params)
-                    else:
-                        result = obj()
-                    
-                    return True, f"✅ Low-level {command_name}() executed successfully. Result: {result}"
-                else:
-                    return True, f"Low-level {command_name} = {obj}"
-                    
-            except Exception as e:
-                # If both fail, try API as final fallback
-                if self.api and hasattr(self.api, command_name):
-                    try:
-                        api_obj = getattr(self.api, command_name)
-                        if callable(api_obj):
-                            if converted_params:
-                                result = api_obj(*converted_params)
-                            else:
-                                result = api_obj()
-                            return True, f"✅ API fallback {command_name}() worked! Result: {result}"
-                        else:
-                            return True, f"API fallback {command_name} = {api_obj}"
-                    except Exception as e2:
-                        return False, f"❌ Both API and low-level failed. API: {e2}, Low-level: {e}"
-                else:
-                    return False, f"❌ Low-level failed: {e}"
-        
-        return False, f"❌ No toy object available"
+        # Raw toy commands (for experimentation and workarounds)
+        return self._execute_raw_command(command_name, converted_params)
     
-    def disconnect(self):
-        """Disconnect"""
-        if self.connected and self.api:
+    def _convert_params(self, params):
+        """Smart parameter conversion"""
+        converted = []
+        for param in params:
+            if isinstance(param, str) and param.strip():
+                # RGB color detection
+                if ',' in param and len(param.split(',')) == 3:
+                    try:
+                        rgb = [int(x.strip()) for x in param.split(',')]
+                        converted.append(Color(*rgb))
+                        continue
+                    except:
+                        pass
+                # Number detection
+                try:
+                    converted.append(float(param) if '.' in param else int(param))
+                except ValueError:
+                    converted.append(param)
+            else:
+                converted.append(param)
+        return converted
+    
+    def _execute_edu_command(self, command_name: str, params: List[Any]):
+        """Execute EDU API command with intelligent auto-fixing"""
+        if not self.api or not hasattr(self.api, command_name):
+            return False, f"❌ EDU API missing {command_name}"
+        
+        spec = self.edu_api_specs[command_name]
+        api_obj = getattr(self.api, command_name)
+        
+        if not callable(api_obj):
+            return True, f"📊 EDU {command_name} = {api_obj}"
+        
+        # Try with provided parameters first
+        if params:
+            try:
+                result = api_obj(*params)
+                return True, f"✅ EDU {command_name}({self._format_params(params)}) → {self._format_result(result)}"
+            except Exception as e:
+                # Auto-fix with safe defaults
+                if "missing" in str(e) and "required" in str(e):
+                    return self._auto_fix_edu_command(command_name, params, api_obj, spec, str(e))
+        
+        # Try with safe defaults
+        try:
+            safe_params = spec['safe_defaults']
+            result = api_obj(*safe_params)
+            return True, f"✅ EDU {command_name}({self._format_params(safe_params)}) → SAFE DEFAULTS → {self._format_result(result)}"
+        except Exception as e:
+            return False, f"❌ EDU {command_name} failed: {e}"
+    
+    def _auto_fix_edu_command(self, command_name: str, params: List[Any], api_obj, spec, error: str):
+        """Intelligent auto-fixing for EDU commands"""
+        safe_defaults = spec['safe_defaults']
+        
+        # Extract missing parameter info from error
+        if "roll" in command_name:
+            # roll(heading, speed, duration)
+            if len(params) == 1:
+                fixed_params = [params[0], 50, 1]  # heading, safe speed, safe duration
+            elif len(params) == 2:
+                fixed_params = [params[0], params[1], 1]  # add safe duration
+            else:
+                fixed_params = safe_defaults
+        elif "spin" in command_name:
+            # spin(degrees, speed)
+            if len(params) == 1:
+                fixed_params = [params[0], 1]  # degrees, safe speed
+            else:
+                fixed_params = safe_defaults
+        else:
+            # Use safe defaults for other commands
+            fixed_params = safe_defaults
+        
+        try:
+            result = api_obj(*fixed_params)
+            return True, f"✅ EDU {command_name}({self._format_params(fixed_params)}) → AUTO-FIXED → {self._format_result(result)}"
+        except Exception as e2:
+            return False, f"❌ EDU {command_name} auto-fix failed: {e2}"
+    
+    def _execute_raw_command(self, command_name: str, params: List[Any]):
+        """Execute raw toy command"""
+        if not self.toy:
+            return False, f"❌ No raw toy access"
+        
+        try:
+            obj = getattr(self.toy, command_name)
+            
+            if callable(obj):
+                result = obj(*params) if params else obj()
+                return True, f"✅ RAW {command_name}({self._format_params(params)}) → {self._format_result(result)}"
+            else:
+                return True, f"📊 RAW {command_name} = {obj}"
+                
+        except Exception as e:
+            return False, f"❌ RAW {command_name} failed: {e}"
+    
+    def _format_params(self, params):
+        """Format parameters for display"""
+        if not params:
+            return ""
+        formatted = []
+        for p in params:
+            if isinstance(p, Color):
+                formatted.append(f"RGB({p.r},{p.g},{p.b})")
+            else:
+                formatted.append(str(p))
+        return ", ".join(formatted)
+    
+    def _format_result(self, result):
+        """Format result for display"""
+        return "OK" if result is None else str(result)
+    
+    def get_matrix_workarounds(self):
+        """Get potential matrix/LED workaround commands"""
+        workarounds = []
+        if self.toy:
+            for cmd in self.matrix_workarounds:
+                if hasattr(self.toy, cmd):
+                    obj = getattr(self.toy, cmd)
+                    workarounds.append({
+                        'name': cmd,
+                        'type': 'method' if callable(obj) else 'object',
+                        'description': f"Potential matrix/LED workaround"
+                    })
+        return workarounds
+    
+    def disconnect(self, force=False):
+        """Disconnect with optional force mode"""
+        messages = []
+        
+        if force:
+            messages.append("🔥 FORCE DISCONNECT - Clearing all connections")
+        
+        # Always try to disconnect API
+        if self.api:
             try:
                 self.api.__exit__(None, None, None)
-            except:
-                pass
+                messages.append("✅ API disconnected")
+            except Exception as e:
+                messages.append(f"⚠️ API disconnect error: {e}")
             self.api = None
+        
+        # Clear toy reference
+        if self.toy:
             self.toy = None
-            self.connected = False
+            messages.append("✅ Toy reference cleared")
+        
+        # Reset LED states
+        self.led_states = {'back_led': False, 'front_led': False, 'main_led': False}
+        
+        # Always mark as disconnected
+        self.connected = False
+        
+        if force:
+            messages.append("🔥 Force disconnect complete - All references cleared")
+        else:
+            messages.append("👋 Disconnected normally")
+        
+        return messages
 
 # Global tester
 tester = SimpleSpheroTester()
@@ -290,78 +413,406 @@ async def get_homepage():
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Simple Sphero Tester</title>
+    <title>Sphero Bolt Command Center</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f0f0f0; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        .panel { background: white; padding: 20px; margin: 10px 0; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .btn { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
-        .btn-primary { background: #007bff; color: white; }
-        .btn-success { background: #28a745; color: white; }
-        .btn-danger { background: #dc3545; color: white; }
-        .btn:hover { opacity: 0.8; }
-        .status { padding: 10px; border-radius: 5px; margin: 10px 0; }
-        .status.connected { background: #d4edda; color: #155724; }
-        .status.disconnected { background: #f8d7da; color: #721c24; }
-        .console { background: #000; color: #0f0; padding: 15px; border-radius: 5px; height: 300px; overflow-y: auto; font-family: monospace; }
-        .commands { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; max-height: 500px; overflow-y: auto; }
-        .command { border: 1px solid #ddd; padding: 10px; border-radius: 5px; cursor: pointer; }
-        .command:hover { background: #f8f9fa; }
-        .command-name { font-weight: bold; color: #007bff; }
-        .command-type { font-size: 12px; color: #666; }
-        .param-input { width: 100%; padding: 5px; margin-top: 5px; border: 1px solid #ddd; border-radius: 3px; }
-        select { padding: 8px; margin: 10px 0; border-radius: 5px; border: 1px solid #ddd; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            background: #0d1117;
+            color: #c9d1d9;
+            font-size: 12px;
+            line-height: 1.3;
+        }
+        
+        .container { max-width: 1800px; margin: 0 auto; padding: 8px; }
+        
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #21262d;
+            margin-bottom: 8px;
+        }
+        
+        .header h1 { font-size: 16px; font-weight: 600; color: #f0f6fc; }
+        
+        .status-bar { display: flex; gap: 8px; align-items: center; font-size: 11px; }
+        
+        .status {
+            padding: 4px 8px;
+            border-radius: 3px;
+            font-weight: 500;
+        }
+        
+        .status.connected { background: #238636; color: #fff; }
+        .status.disconnected { background: #da3633; color: #fff; }
+        
+        .btn {
+            padding: 4px 12px;
+            border: 1px solid #30363d;
+            border-radius: 3px;
+            background: #21262d;
+            color: #c9d1d9;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.1s;
+        }
+        
+        .btn:hover { background: #30363d; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-primary { background: #238636; border-color: #238636; }
+        .btn-danger { background: #da3633; border-color: #da3633; }
+        
+        .main-grid {
+            display: grid;
+            grid-template-columns: 280px 1fr 350px;
+            gap: 8px;
+            height: calc(100vh - 60px);
+        }
+        
+        .panel {
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        
+        .panel-header {
+            padding: 6px 12px;
+            background: #21262d;
+            border-bottom: 1px solid #30363d;
+            font-weight: 600;
+            font-size: 11px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .panel-content {
+            height: calc(100% - 29px);
+            overflow-y: auto;
+        }
+        
+        .section {
+            border-bottom: 1px solid #21262d;
+        }
+        
+        .section-header {
+            padding: 6px 12px;
+            background: #0d1117;
+            font-size: 10px;
+            font-weight: 600;
+            color: #7d8590;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .controls-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 4px;
+            padding: 8px;
+        }
+        
+        .control-btn {
+            padding: 8px 6px;
+            border: 1px solid #30363d;
+            border-radius: 3px;
+            background: #21262d;
+            color: #c9d1d9;
+            cursor: pointer;
+            font-size: 10px;
+            text-align: center;
+            transition: all 0.1s;
+        }
+        
+        .control-btn:hover { background: #30363d; }
+        .control-btn.active { border-color: #238636; background: #0d4a1a; }
+        
+        .commands-container {
+            padding: 4px;
+        }
+        
+        .command-section {
+            margin-bottom: 8px;
+        }
+        
+        .command-section-title {
+            padding: 4px 8px;
+            background: #0d1117;
+            font-size: 10px;
+            font-weight: 600;
+            color: #58a6ff;
+            border-bottom: 1px solid #21262d;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .command-section-title:hover { background: #161b22; }
+        
+        .command-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 2px;
+            padding: 4px;
+            background: #0d1117;
+        }
+        
+        .cmd {
+            padding: 4px 6px;
+            border: 1px solid #21262d;
+            border-radius: 2px;
+            background: #161b22;
+            cursor: pointer;
+            font-size: 9px;
+            transition: all 0.1s;
+            position: relative;
+        }
+        
+        .cmd:hover { background: #21262d; border-color: #30363d; }
+        
+        .cmd.edu { border-left: 3px solid #238636; }
+        .cmd.raw { border-left: 3px solid #f85149; }
+        .cmd.workaround { border-left: 3px solid #d29922; }
+        .cmd.working { background: #0d4a1a; }
+        .cmd.duplicate { opacity: 0.5; }
+        
+        .cmd-name {
+            font-weight: 500;
+            color: #c9d1d9;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .cmd-meta {
+            font-size: 8px;
+            color: #7d8590;
+            margin-top: 1px;
+        }
+        
+        .console {
+            background: #0d1117;
+            color: #7d8590;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 10px;
+            line-height: 1.2;
+            height: 100%;
+            overflow-y: auto;
+            padding: 8px;
+        }
+        
+        .console-line {
+            margin-bottom: 1px;
+            word-break: break-all;
+        }
+        
+        .console-line.success { color: #238636; }
+        .console-line.error { color: #f85149; }
+        .console-line.info { color: #58a6ff; }
+        .console-line.warning { color: #d29922; }
+        
+        .filter-bar {
+            padding: 6px 8px;
+            background: #0d1117;
+            border-bottom: 1px solid #21262d;
+            display: flex;
+            gap: 4px;
+            align-items: center;
+        }
+        
+        .filter-btn {
+            padding: 2px 6px;
+            border: 1px solid #30363d;
+            border-radius: 2px;
+            background: #21262d;
+            color: #7d8590;
+            cursor: pointer;
+            font-size: 9px;
+            transition: all 0.1s;
+        }
+        
+        .filter-btn:hover { background: #30363d; }
+        .filter-btn.active { background: #58a6ff; color: #fff; }
+        
+        .stats { display: flex; gap: 12px; font-size: 10px; color: #7d8590; }
+        .stat-value { color: #58a6ff; font-weight: 500; }
+        
+        .command-progress {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(13, 17, 23, 0.95);
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 20px;
+            z-index: 1000;
+            min-width: 300px;
+            text-align: center;
+            backdrop-filter: blur(4px);
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 4px;
+            background: #21262d;
+            border-radius: 2px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: #238636;
+            width: 0%;
+            transition: width 0.1s ease;
+        }
+        
+        .command-name-display {
+            font-weight: 600;
+            color: #58a6ff;
+            margin-bottom: 5px;
+        }
+        
+        .command-params-display {
+            font-size: 11px;
+            color: #7d8590;
+            font-family: monospace;
+        }
+        
+        .param-input {
+            width: 100%;
+            padding: 2px 4px;
+            margin-top: 2px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 2px;
+            color: #c9d1d9;
+            font-size: 9px;
+        }
+        
+        .collapse-btn {
+            background: none;
+            border: none;
+            color: #7d8590;
+            cursor: pointer;
+            font-size: 10px;
+        }
+        
+        .section.collapsed .command-grid { display: none; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🤖 Simple Sphero Tester</h1>
-        
-        <div class="panel">
-            <button id="connectBtn" class="btn btn-primary">🔌 Connect to Sphero</button>
-            <button id="disconnectBtn" class="btn btn-danger" disabled>🔌 Disconnect</button>
-            <div id="status" class="status disconnected">❌ Disconnected</div>
+        <div class="header">
+            <h1>⚡ Sphero Bolt Command Center</h1>
+            <div class="status-bar">
+                <div class="stats">
+                    <div>EDU: <span id="eduCount" class="stat-value">0</span></div>
+                    <div>RAW: <span id="rawCount" class="stat-value">0</span></div>
+                    <div>Exec: <span id="execCount" class="stat-value">0</span></div>
+                </div>
+                <button id="connectBtn" class="btn btn-primary">Connect</button>
+                <button id="disconnectBtn" class="btn btn-danger">Disconnect</button>
+                <button id="forceDisconnectBtn" class="btn btn-danger">Force DC</button>
+                <div id="status" class="status disconnected">Disconnected</div>
+            </div>
         </div>
         
-        <div class="panel">
-            <h3>⚡ Quick Tests (Working Commands)</h3>
-            <button class="btn btn-success" onclick="quickTest('set_back_led', ['255,0,0'])">🔴 Red Back LED</button>
-            <button class="btn btn-success" onclick="quickTest('set_front_led', ['0,255,0'])">🟢 Green Front LED</button>
-            <button class="btn btn-success" onclick="quickTest('spin', ['360', '1'])">🌀 Spin 360°</button>
-            <button class="btn btn-success" onclick="quickTest('roll', ['90', '0'])">➡️ Roll Forward</button>
-        </div>
-        
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+        <div class="main-grid">
             <div class="panel">
-                <h3>🎮 Commands</h3>
-                <select id="categoryFilter">
-                    <option value="">All Categories</option>
-                </select>
-                <div id="commands" class="commands">
-                    <p>Connect to Sphero to load commands...</p>
+                <div class="panel-header">🎛️ Quick Controls</div>
+                <div class="panel-content">
+                    <div class="section">
+                        <div class="section-header">LEDs (EDU)</div>
+                        <div class="controls-grid">
+                            <div class="control-btn" id="backLedBtn" onclick="toggleLED('back_led')">Back</div>
+                            <div class="control-btn" id="frontLedBtn" onclick="toggleLED('front_led')">Front</div>
+                            <div class="control-btn" id="mainLedBtn" onclick="toggleLED('main_led')">Main</div>
+                            <div class="control-btn" onclick="executeCommand('clear_matrix', [])">Clear</div>
+                        </div>
+                    </div>
+                    <div class="section">
+                        <div class="section-header">Movement (EDU)</div>
+                        <div class="controls-grid">
+                            <div class="control-btn" onclick="executeCommand('spin', ['360'])">Spin</div>
+                            <div class="control-btn" onclick="executeCommand('roll', ['0'])">Roll</div>
+                            <div class="control-btn" onclick="executeCommand('get_heading', [])">Heading</div>
+                            <div class="control-btn" onclick="executeCommand('set_stabilization', ['false'])">Unstable</div>
+                        </div>
+                    </div>
+                    <div class="section">
+                        <div class="section-header">Matrix Workarounds (RAW)</div>
+                        <div id="workarounds" class="controls-grid">
+                            <div style="padding: 20px; text-align: center; color: #7d8590; font-size: 10px;">Connect to load</div>
+                        </div>
+                    </div>
                 </div>
             </div>
             
             <div class="panel">
-                <h3>📟 Console</h3>
-                <div id="console" class="console">
-                    <div>🚀 Simple Sphero Tester Ready</div>
-                    <div>💡 Click 'Connect to Sphero' to start</div>
+                <div class="panel-header">
+                    📋 Commands
+                    <div class="filter-bar">
+                        <div class="filter-btn active" id="filterAll" onclick="setFilter('all')">All</div>
+                        <div class="filter-btn" id="filterEdu" onclick="setFilter('edu')">EDU</div>
+                        <div class="filter-btn" id="filterRaw" onclick="setFilter('raw')">RAW</div>
+                        <div class="filter-btn" id="filterWorkaround" onclick="setFilter('workaround')">Fix</div>
+                    </div>
+                </div>
+                <div class="panel-content">
+                    <div id="commands" class="commands-container">
+                        <div style="text-align: center; padding: 40px; color: #7d8590;">
+                            Connect to Sphero to load commands
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="panel">
+                <div class="panel-header">📟 Console</div>
+                <div class="panel-content" style="padding: 0;">
+                    <div id="console" class="console">
+                        <div class="console-line info">Sphero Bolt Command Center v2.0</div>
+                        <div class="console-line">Ready for connection...</div>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
+    
+    <!-- Command Progress Overlay -->
+    <div id="commandProgress" class="command-progress" style="display: none;">
+        <div class="command-name-display" id="progressCommandName">Executing Command...</div>
+        <div class="command-params-display" id="progressCommandParams"></div>
+        <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <div style="font-size: 10px; color: #7d8590;">Estimated time: <span id="progressTime">1s</span></div>
+    </div>
 
     <script>
         let ws = null;
-        let commands = [];
+        let eduCommands = [];
+        let rawCommands = [];
+        let workarounds = [];
         let connected = false;
+        let execCount = 0;
+        let ledStates = { back_led: false, front_led: false, main_led: false };
+        let currentFilter = 'all';
         
         function initWebSocket() {
             ws = new WebSocket(`ws://${window.location.host}/ws`);
             
             ws.onopen = function() {
-                addConsoleMessage('🔗 WebSocket connected');
+                addConsoleMessage('WS connected', 'info');
             };
             
             ws.onmessage = function(event) {
@@ -370,7 +821,7 @@ async def get_homepage():
             };
             
             ws.onclose = function() {
-                addConsoleMessage('❌ WebSocket disconnected');
+                addConsoleMessage('WS disconnected', 'error');
                 setTimeout(initWebSocket, 3000);
             };
         }
@@ -379,117 +830,219 @@ async def get_homepage():
             const { type, data } = message;
             
             if (type === 'status') {
-                addConsoleMessage(data);
-                if (data.includes('Connected')) {
+                const msgType = data.includes('✅') ? 'success' : data.includes('❌') ? 'error' : 
+                              data.includes('⚠️') ? 'warning' : 'info';
+                addConsoleMessage(data.replace(/[✅❌⚠️]/g, '').trim(), msgType);
+                if (data.includes('CONNECTION SUCCESS')) {
                     connected = true;
                     updateStatus(true);
                 }
             } else if (type === 'commands') {
-                commands = data;
+                eduCommands = message.edu_commands || [];
+                rawCommands = message.raw_commands || [];
+                workarounds = message.workarounds || [];
+                
+                document.getElementById('eduCount').textContent = eduCommands.length;
+                document.getElementById('rawCount').textContent = rawCommands.length;
+                
                 loadCommands();
-                addConsoleMessage(`✅ Loaded ${data.length} commands`);
+                loadWorkarounds();
+                addConsoleMessage(`Loaded ${eduCommands.length} EDU + ${rawCommands.length} RAW commands`, 'success');
             } else if (type === 'result') {
-                addConsoleMessage(data);
+                const msgType = data.includes('✅') ? 'success' : data.includes('❌') ? 'error' : 'info';
+                addConsoleMessage(data.replace(/[✅❌]/g, '').trim(), msgType);
+                if (data.includes('✅')) {
+                    execCount++;
+                    document.getElementById('execCount').textContent = execCount;
+                }
             }
         }
         
-        function addConsoleMessage(message) {
+        function addConsoleMessage(message, type = 'info') {
             const console = document.getElementById('console');
             const div = document.createElement('div');
-            div.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            div.className = `console-line ${type}`;
+            div.textContent = `${new Date().toLocaleTimeString().slice(-8)} ${message}`;
             console.appendChild(div);
             console.scrollTop = console.scrollHeight;
+            
+            if (console.children.length > 500) {
+                console.removeChild(console.firstChild);
+            }
         }
         
         function updateStatus(isConnected) {
             const status = document.getElementById('status');
             const connectBtn = document.getElementById('connectBtn');
             const disconnectBtn = document.getElementById('disconnectBtn');
+            const forceDisconnectBtn = document.getElementById('forceDisconnectBtn');
+            
+            // ROBUST STATE MANAGEMENT - Always sync with actual state
+            connected = isConnected;
             
             if (isConnected) {
                 status.className = 'status connected';
-                status.textContent = '✅ Connected';
+                status.textContent = 'Connected';
                 connectBtn.disabled = true;
                 disconnectBtn.disabled = false;
+                forceDisconnectBtn.disabled = false;
             } else {
                 status.className = 'status disconnected';
-                status.textContent = '❌ Disconnected';
+                status.textContent = 'Disconnected';
                 connectBtn.disabled = false;
-                disconnectBtn.disabled = true;
+                disconnectBtn.disabled = false;  // Always allow disconnect
+                forceDisconnectBtn.disabled = false;  // Always allow force disconnect
             }
         }
         
-        function loadCommands() {
-            const container = document.getElementById('commands');
-            const categoryFilter = document.getElementById('categoryFilter');
-            
-            // Load categories
-            const categories = [...new Set(commands.map(cmd => cmd.category))].sort();
-            categoryFilter.innerHTML = '<option value="">All Categories</option>';
-            categories.forEach(cat => {
-                const option = document.createElement('option');
-                option.value = cat;
-                option.textContent = cat;
-                categoryFilter.appendChild(option);
-            });
-            
-            renderCommands();
+        function forceResetConnectionState() {
+            // NUCLEAR OPTION - Reset everything to disconnected state
+            connected = false;
+            updateStatus(false);
+            resetLEDStates();
+            addConsoleMessage('Connection state force reset', 'warning');
         }
         
-        function renderCommands(filterCategory = '') {
-            const container = document.getElementById('commands');
-            const filteredCommands = filterCategory ? 
-                commands.filter(cmd => cmd.category === filterCategory) : 
-                commands;
+        function toggleLED(ledType) {
+            if (!connected) {
+                addConsoleMessage('Not connected', 'error');
+                return;
+            }
             
+            const btnId = ledType.replace('_', '') + 'Btn';
+            const btn = document.getElementById(btnId);
+            const isActive = btn.classList.contains('active');
+            
+            if (isActive) {
+                // Turn OFF - send black color
+                executeCommand(`set_${ledType}`, ['0,0,0']);
+                btn.classList.remove('active');
+                ledStates[ledType] = false;
+                addConsoleMessage(`${ledType} OFF`, 'info');
+            } else {
+                // Turn ON - send color
+                const colors = {
+                    'back_led': '255,0,0',
+                    'front_led': '0,255,0',
+                    'main_led': '0,0,255'
+                };
+                executeCommand(`set_${ledType}`, [colors[ledType]]);
+                btn.classList.add('active');
+                ledStates[ledType] = true;
+                addConsoleMessage(`${ledType} ON`, 'info');
+            }
+        }
+        
+        function loadWorkarounds() {
+            const container = document.getElementById('workarounds');
             container.innerHTML = '';
             
-            filteredCommands.forEach(cmd => {
+            workarounds.forEach(cmd => {
                 const div = document.createElement('div');
-                div.className = 'command';
-                div.onclick = () => executeCommand(cmd.name);
-                
-                div.innerHTML = `
-                    <div class="command-name">${cmd.name}</div>
-                    <div class="command-type">${cmd.type} - ${cmd.category}</div>
-                    ${cmd.type === 'method' ? '<input type="text" class="param-input" placeholder="Parameters (comma-separated)" onclick="event.stopPropagation()">' : ''}
-                `;
-                
+                div.className = 'control-btn';
+                div.onclick = () => executeCommand(cmd.name, [], true);
+                div.textContent = cmd.name.slice(0, 8);
+                div.title = cmd.name;
                 container.appendChild(div);
             });
         }
         
-        function executeCommand(commandName, params = null) {
+        function setFilter(filter) {
+            currentFilter = filter;
+            document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
+            document.getElementById('filter' + filter.charAt(0).toUpperCase() + filter.slice(1)).classList.add('active');
+            loadCommands();
+        }
+        
+        function loadCommands() {
+            const container = document.getElementById('commands');
+            container.innerHTML = '';
+            
+            // Group commands by category
+            const categories = {};
+            
+            if (currentFilter === 'all' || currentFilter === 'edu') {
+                eduCommands.forEach(cmd => {
+                    if (!categories[cmd.category]) categories[cmd.category] = { edu: [], raw: [] };
+                    categories[cmd.category].edu.push(cmd);
+                });
+            }
+            
+            if (currentFilter === 'all' || currentFilter === 'raw') {
+                rawCommands.forEach(cmd => {
+                    if (currentFilter === 'workaround' && !cmd.is_workaround) return;
+                    if (!categories[cmd.category]) categories[cmd.category] = { edu: [], raw: [] };
+                    categories[cmd.category].raw.push(cmd);
+                });
+            }
+            
+            // Render categories
+            Object.keys(categories).sort().forEach(category => {
+                const section = document.createElement('div');
+                section.className = 'command-section';
+                
+                const title = document.createElement('div');
+                title.className = 'command-section-title';
+                title.innerHTML = `${category} <span class="collapse-btn">−</span>`;
+                title.onclick = () => toggleSection(section);
+                section.appendChild(title);
+                
+                const grid = document.createElement('div');
+                grid.className = 'command-grid';
+                
+                // Add EDU commands
+                categories[category].edu.forEach(cmd => {
+                    const div = document.createElement('div');
+                    div.className = `cmd edu ${cmd.working ? 'working' : ''}`;
+                    div.onclick = () => executeCommand(cmd.name);
+                    div.innerHTML = `
+                        <div class="cmd-name">${cmd.name}</div>
+                        <div class="cmd-meta">EDU • ${cmd.params.length}p</div>
+                    `;
+                    grid.appendChild(div);
+                });
+                
+                // Add RAW commands (mark duplicates)
+                categories[category].raw.forEach(cmd => {
+                    const div = document.createElement('div');
+                    div.className = `cmd raw ${cmd.is_workaround ? 'workaround' : ''} ${cmd.edu_duplicate ? 'duplicate' : ''}`;
+                    div.onclick = () => executeCommand(cmd.name, [], true);
+                    div.innerHTML = `
+                        <div class="cmd-name">${cmd.name}</div>
+                        <div class="cmd-meta">RAW${cmd.is_workaround ? ' • FIX' : ''}${cmd.edu_duplicate ? ' • DUP' : ''}</div>
+                    `;
+                    grid.appendChild(div);
+                });
+                
+                section.appendChild(grid);
+                container.appendChild(section);
+            });
+        }
+        
+        function toggleSection(section) {
+            section.classList.toggle('collapsed');
+            const btn = section.querySelector('.collapse-btn');
+            btn.textContent = section.classList.contains('collapsed') ? '+' : '−';
+        }
+        
+        function executeCommand(commandName, params = null, forceRaw = false) {
             if (!connected) {
-                addConsoleMessage('❌ Not connected to Sphero');
+                addConsoleMessage('Not connected', 'error');
                 return;
             }
             
-            if (!params) {
-                const card = event.target.closest('.command');
-                const paramInput = card.querySelector('.param-input');
-                if (paramInput && paramInput.value.trim()) {
-                    params = paramInput.value.split(',').map(p => p.trim());
+            if (!params && event) {
+                const input = event.target.closest('.cmd')?.querySelector('.param-input');
+                if (input && input.value.trim()) {
+                    params = input.value.split(',').map(p => p.trim());
                 }
             }
             
             ws.send(JSON.stringify({
                 action: 'execute_command',
                 command: commandName,
-                params: params
-            }));
-        }
-        
-        function quickTest(command, params) {
-            if (!connected) {
-                addConsoleMessage('❌ Not connected to Sphero');
-                return;
-            }
-            
-            ws.send(JSON.stringify({
-                action: 'execute_command',
-                command: command,
-                params: params
+                params: params,
+                force_raw: forceRaw
             }));
         }
         
@@ -505,10 +1058,11 @@ async def get_homepage():
             }
             connected = false;
             updateStatus(false);
-        };
-        
-        document.getElementById('categoryFilter').onchange = function() {
-            renderCommands(this.value);
+            Object.keys(ledStates).forEach(led => {
+                ledStates[led] = false;
+                const btn = document.getElementById(led.replace('_', '') + 'Btn');
+                if (btn) btn.classList.remove('active');
+            });
         };
         
         initWebSocket();
@@ -544,17 +1098,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 if success:
                     await websocket.send_json({
                         'type': 'commands', 
-                        'data': tester.commands_cache
+                        'edu_commands': tester.edu_commands,
+                        'raw_commands': tester.raw_commands,
+                        'workarounds': tester.get_matrix_workarounds()
                     })
                     
             elif action == 'disconnect':
-                tester.disconnect()
-                await websocket.send_json({'type': 'status', 'data': '👋 Disconnected'})
+                force = data.get('force', False)
+                messages = tester.disconnect(force)
+                for message in messages:
+                    await websocket.send_json({'type': 'status', 'data': message})
                 
             elif action == 'execute_command':
                 command = data.get('command')
                 params = data.get('params')
-                success, result = tester.execute_command(command, params)
+                force_raw = data.get('force_raw', False)
+                success, result = tester.execute_command(command, params, force_raw)
                 await websocket.send_json({'type': 'result', 'data': result})
                 
     except WebSocketDisconnect:
