@@ -35,10 +35,42 @@ class SimpleSpheroTester:
             'get_heading': {'params': [], 'safe_defaults': []},
             'get_acceleration': {'params': [], 'safe_defaults': []},
             'get_gyroscope': {'params': [], 'safe_defaults': []},
-            'scroll_matrix_text': {'params': ['text', 'Color'], 'safe_defaults': ['HI', Color(255, 255, 0)]},
+            'scroll_matrix_text': {'params': ['text', 'fps', 'wait'], 'safe_defaults': ['HI', 10, True]},
             'set_matrix_character': {'params': ['char', 'Color'], 'safe_defaults': ['A', Color(0, 255, 255)]},
             'clear_matrix': {'params': [], 'safe_defaults': []},
             'set_stabilization': {'params': ['enabled'], 'safe_defaults': [True]},
+            # Note: set_matrix_pixel and set_matrix_line don't exist in EDU API - remove them
+            'set_matrix_fill': {'params': ['x1', 'y1', 'x2', 'y2', 'color'], 'safe_defaults': [0, 0, 7, 7, Color(0, 255, 0)]},
+            # Note: draw_matrix_text doesn't exist in EDU API - remove it
+        }
+        
+        # RAW command auto-fix definitions with comprehensive LED/Matrix commands
+        self.raw_command_specs = {
+            # LED Control Commands
+            'set_all_leds_with_8_bit_mask': {'params': ['mask', 'values'], 'safe_defaults': [255, [255, 0, 0, 255, 255, 0, 0, 255]]},
+            'set_led': {'params': ['led_id', 'r', 'g', 'b', 'brightness'], 'safe_defaults': [0, 255, 0, 0, 255]},
+            'set_rgb_led_output': {'params': ['r', 'g', 'b'], 'safe_defaults': [255, 0, 0]},
+            'set_back_led_output': {'params': ['brightness'], 'safe_defaults': [255]},
+            'set_front_led_output': {'params': ['brightness'], 'safe_defaults': [255]},
+            
+            # Matrix/Display Commands  
+            'draw_compressed_frame_player_fill': {'params': ['r', 'g', 'b'], 'safe_defaults': [255, 0, 0]},
+            'draw_compressed_frame_player_line': {'params': ['x1', 'y1', 'x2', 'y2', 'r', 'g', 'b'], 'safe_defaults': [0, 0, 7, 7, 0, 255, 0]},
+            'draw_compressed_frame_player_pixel': {'params': ['x', 'y', 'r', 'g', 'b'], 'safe_defaults': [4, 4, 0, 0, 255]},
+            'set_compressed_frame_player_one_color': {'params': ['r', 'g', 'b'], 'safe_defaults': [255, 255, 0]},
+            'assign_compressed_frame_player_frames_to_animation': {'params': ['animation_id', 'i_arr'], 'safe_defaults': [1, [0]]},
+            'start_compressed_frame_player_animation': {'params': ['animation_id'], 'safe_defaults': [1]},
+            'stop_compressed_frame_player_animation': {'params': [], 'safe_defaults': []},
+            
+            # Matrix Text/Character Commands
+            'set_character_matrix_display_fill': {'params': ['r', 'g', 'b'], 'safe_defaults': [255, 0, 255]},
+            'set_character_matrix_display_pixel': {'params': ['x', 'y', 'r', 'g', 'b'], 'safe_defaults': [4, 4, 255, 255, 255]},
+            'set_character_matrix_display_line': {'params': ['x1', 'y1', 'x2', 'y2', 'r', 'g', 'b'], 'safe_defaults': [0, 0, 7, 7, 255, 0, 0]},
+            'clear_character_matrix_display': {'params': [], 'safe_defaults': []},
+            
+            # Advanced LED Commands
+            'set_all_leds': {'params': ['led_mask', 'r', 'g', 'b'], 'safe_defaults': [255, 255, 0, 0]},
+            'set_user_led_color': {'params': ['r', 'g', 'b'], 'safe_defaults': [0, 255, 0]},
         }
         
         # Matrix/LED workaround attempts using raw commands
@@ -264,11 +296,20 @@ class SimpleSpheroTester:
     
     def _execute_edu_command(self, command_name: str, params: List[Any]):
         """Execute EDU API command with intelligent auto-fixing"""
-        if not self.api or not hasattr(self.api, command_name):
-            return False, f"❌ EDU API missing {command_name}"
+        if not self.api:
+            return False, f"❌ No EDU API connection"
+            
+        if not hasattr(self.api, command_name):
+            return False, f"❌ EDU API doesn't have '{command_name}' command"
+        
+        if command_name not in self.edu_api_specs:
+            return False, f"❌ '{command_name}' not in command specs - may not be supported"
         
         spec = self.edu_api_specs[command_name]
         api_obj = getattr(self.api, command_name)
+        
+        if api_obj is None:
+            return False, f"❌ '{command_name}' exists but is None - not available on this Sphero model"
         
         if not callable(api_obj):
             return True, f"📊 EDU {command_name} = {api_obj}"
@@ -295,24 +336,8 @@ class SimpleSpheroTester:
         """Intelligent auto-fixing for EDU commands"""
         safe_defaults = spec['safe_defaults']
         
-        # Extract missing parameter info from error
-        if "roll" in command_name:
-            # roll(heading, speed, duration)
-            if len(params) == 1:
-                fixed_params = [params[0], 50, 1]  # heading, safe speed, safe duration
-            elif len(params) == 2:
-                fixed_params = [params[0], params[1], 1]  # add safe duration
-            else:
-                fixed_params = safe_defaults
-        elif "spin" in command_name:
-            # spin(degrees, speed)
-            if len(params) == 1:
-                fixed_params = [params[0], 1]  # degrees, safe speed
-            else:
-                fixed_params = safe_defaults
-        else:
-            # Use safe defaults for other commands
-            fixed_params = safe_defaults
+        # Smart parameter completion based on what's provided
+        fixed_params = self._complete_missing_params(command_name, params, safe_defaults, error)
         
         try:
             result = api_obj(*fixed_params)
@@ -320,8 +345,45 @@ class SimpleSpheroTester:
         except Exception as e2:
             return False, f"❌ EDU {command_name} auto-fix failed: {e2}"
     
+    def _complete_missing_params(self, command_name: str, provided_params: List[Any], safe_defaults: List[Any], error: str):
+        """Intelligently complete missing parameters"""
+        if not provided_params:
+            return safe_defaults
+        
+        # Command-specific parameter completion
+        if "scroll_matrix_text" in command_name:
+            # scroll_matrix_text(text, fps, wait)
+            if len(provided_params) == 1:
+                return [provided_params[0], 10, True]  # text + safe fps + wait
+            elif len(provided_params) == 2:
+                return [provided_params[0], provided_params[1], True]  # text + fps + safe wait
+            
+        elif "set_matrix_fill" in command_name:
+            # set_matrix_fill(x1, y1, x2, y2, color)
+            if len(provided_params) == 1:
+                # If only color provided, fill entire matrix
+                return [0, 0, 7, 7, provided_params[0]]  # full matrix + provided color
+            elif len(provided_params) == 4:
+                # If coordinates provided, add safe color
+                return provided_params + [Color(0, 255, 0)]  # coordinates + safe color
+            
+        elif "roll" in command_name:
+            # roll(heading, speed, duration)
+            if len(provided_params) == 1:
+                return [provided_params[0], 50, 1]  # heading + safe speed + duration
+            elif len(provided_params) == 2:
+                return [provided_params[0], provided_params[1], 1]  # heading + speed + safe duration
+                
+        elif "spin" in command_name:
+            # spin(degrees, speed)
+            if len(provided_params) == 1:
+                return [provided_params[0], 1]  # degrees + safe speed
+        
+        # Default: use safe defaults if we can't intelligently complete
+        return safe_defaults
+    
     def _execute_raw_command(self, command_name: str, params: List[Any]):
-        """Execute raw toy command"""
+        """Execute raw toy command with auto-fixing"""
         if not self.toy:
             return False, f"❌ No raw toy access"
         
@@ -335,7 +397,114 @@ class SimpleSpheroTester:
                 return True, f"📊 RAW {command_name} = {obj}"
                 
         except Exception as e:
+            # Try auto-fixing for missing parameters
+            if "missing" in str(e) and "required" in str(e) and command_name in self.raw_command_specs:
+                return self._auto_fix_raw_command(command_name, params, obj, e)
             return False, f"❌ RAW {command_name} failed: {e}"
+    
+    def _auto_fix_raw_command(self, command_name: str, params: List[Any], obj, error: Exception):
+        """Auto-fix raw commands with missing parameters"""
+        if command_name not in self.raw_command_specs:
+            return False, f"❌ RAW {command_name} not in auto-fix specs"
+            
+        spec = self.raw_command_specs[command_name]
+        safe_defaults = spec['safe_defaults']
+        
+        # Intelligent parameter completion based on command type
+        fixed_params = self._complete_raw_params(command_name, params, safe_defaults)
+        
+        try:
+            result = obj(*fixed_params)
+            return True, f"✅ RAW {command_name}({self._format_params(fixed_params)}) → AUTO-FIXED → {self._format_result(result)}"
+        except Exception as e2:
+            return False, f"❌ RAW {command_name} auto-fix failed: {e2}"
+    
+    def _complete_raw_params(self, command_name: str, provided_params: List[Any], safe_defaults: List[Any]):
+        """Intelligently complete RAW command parameters"""
+        if not provided_params:
+            return safe_defaults
+        
+        # LED Commands
+        if 'set_led' == command_name:
+            # set_led(led_id, r, g, b, brightness)
+            if len(provided_params) == 1:
+                return [provided_params[0], 255, 0, 0, 255]  # led_id + red color + full brightness
+            elif len(provided_params) == 4:
+                return provided_params + [255]  # add full brightness
+                
+        elif 'set_all_leds_with_8_bit_mask' == command_name:
+            # set_all_leds_with_8_bit_mask(mask, values)
+            if len(provided_params) == 1:
+                return [provided_params[0], [255, 0, 0, 255, 255, 0, 0, 255]]  # mask + safe LED pattern
+                
+        elif 'draw_compressed_frame_player_line' == command_name:
+            # draw_compressed_frame_player_line(x1, y1, x2, y2, r, g, b)
+            if len(provided_params) == 4:
+                return provided_params + [0, 255, 0]  # coordinates + green color
+            elif len(provided_params) == 5:
+                return provided_params + [255, 0]  # add g, b components
+            elif len(provided_params) == 6:
+                return provided_params + [0]  # add b component
+                
+        elif 'draw_compressed_frame_player_pixel' == command_name:
+            # draw_compressed_frame_player_pixel(x, y, r, g, b)
+            if len(provided_params) == 2:
+                return provided_params + [0, 0, 255]  # x, y + blue color
+            elif len(provided_params) == 3:
+                return provided_params + [0, 255]  # add g, b components
+            elif len(provided_params) == 4:
+                return provided_params + [255]  # add b component
+                
+        elif 'assign_compressed_frame_player_frames_to_animation' == command_name:
+            # assign_compressed_frame_player_frames_to_animation(animation_id, i_arr)
+            if len(provided_params) == 1:
+                return [provided_params[0], [0]]  # animation_id + safe frame array
+        
+        # Default: fill missing parameters with safe defaults
+        needed_params = len(safe_defaults) - len(provided_params)
+        if needed_params > 0:
+            return provided_params + safe_defaults[-needed_params:]
+        
+        return provided_params
+    
+    def test_raw_command_discovery(self, command_name: str):
+        """Discover RAW command parameters through safe testing"""
+        if not self.toy:
+            return False, "❌ No raw toy access for discovery"
+        
+        if not hasattr(self.toy, command_name):
+            return False, f"❌ RAW command '{command_name}' not found"
+        
+        obj = getattr(self.toy, command_name)
+        if not callable(obj):
+            return True, f"📊 RAW {command_name} = {obj} (not callable)"
+        
+        # Try to get function signature information
+        import inspect
+        try:
+            sig = inspect.signature(obj)
+            param_names = list(sig.parameters.keys())
+            param_count = len(param_names)
+            
+            result_parts = [f"🔍 RAW {command_name} discovery:"]
+            result_parts.append(f"   Parameters: {param_count} → {param_names}")
+            
+            # Try safe test calls based on parameter patterns
+            if command_name in self.raw_command_specs:
+                safe_defaults = self.raw_command_specs[command_name]['safe_defaults']
+                try:
+                    result = obj(*safe_defaults)
+                    result_parts.append(f"   ✅ Test call successful → {self._format_result(result)}")
+                    result_parts.append(f"   Safe params: {self._format_params(safe_defaults)}")
+                except Exception as e:
+                    result_parts.append(f"   ⚠️ Test call failed: {e}")
+            else:
+                result_parts.append(f"   ⚠️ No safe defaults defined for testing")
+            
+            return True, "\n".join(result_parts)
+            
+        except Exception as e:
+            return False, f"❌ Discovery failed: {e}"
     
     def _format_params(self, params):
         """Format parameters for display"""
@@ -628,6 +797,37 @@ async def get_homepage():
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
+        }
+        
+        .cmd-actions {
+            display: flex;
+            gap: 2px;
+            margin-top: 2px;
+        }
+        
+        .mini-btn {
+            padding: 1px 4px;
+            font-size: 7px;
+            border: 1px solid #30363d;
+            background: #21262d;
+            color: #c9d1d9;
+            border-radius: 2px;
+            cursor: pointer;
+            transition: all 0.1s;
+        }
+        
+        .mini-btn:hover {
+            background: #30363d;
+            border-color: #484f58;
+        }
+        
+        .mini-btn.discover {
+            background: #0969da;
+            border-color: #1f6feb;
+        }
+        
+        .mini-btn.discover:hover {
+            background: #1f6feb;
         }
         
         .cmd-meta {
@@ -949,7 +1149,8 @@ async def get_homepage():
                 return;
             }
             
-            const btnId = ledType.replace('_', '') + 'Btn';
+            // Fix button ID mapping - capitalize LED
+            const btnId = ledType.replace('_led', 'Led') + 'Btn';
             const btn = document.getElementById(btnId);
             const isActive = btn.classList.contains('active');
             
@@ -1046,10 +1247,17 @@ async def get_homepage():
                 categories[category].raw.forEach(cmd => {
                     const div = document.createElement('div');
                     div.className = `cmd raw ${cmd.is_workaround ? 'workaround' : ''} ${cmd.edu_duplicate ? 'duplicate' : ''}`;
-                    div.onclick = () => executeCommand(cmd.name, [], true);
+                    
+                    // Add discovery button for LED/Matrix commands
+                    const isLedMatrix = cmd.name.includes('led') || cmd.name.includes('matrix') || cmd.name.includes('compressed_frame');
+                    
                     div.innerHTML = `
                         <div class="cmd-name">${cmd.name}</div>
                         <div class="cmd-meta">RAW${cmd.is_workaround ? ' • FIX' : ''}${cmd.edu_duplicate ? ' • DUP' : ''}</div>
+                        <div class="cmd-actions">
+                            <button class="mini-btn" onclick="event.stopPropagation(); executeCommand('${cmd.name}', [], true)">Test</button>
+                            ${isLedMatrix ? `<button class="mini-btn discover" onclick="event.stopPropagation(); discoverCommand('${cmd.name}')">🔍</button>` : ''}
+                        </div>
                     `;
                     grid.appendChild(div);
                 });
@@ -1063,6 +1271,20 @@ async def get_homepage():
             section.classList.toggle('collapsed');
             const btn = section.querySelector('.collapse-btn');
             btn.textContent = section.classList.contains('collapsed') ? '+' : '−';
+        }
+        
+        function discoverCommand(commandName) {
+            if (!connected) {
+                addConsoleMessage('Not connected', 'error');
+                return;
+            }
+            
+            addConsoleMessage(`🔍 Discovering: ${commandName}`, 'info');
+            
+            ws.send(JSON.stringify({
+                action: 'discover_command',
+                command: commandName
+            }));
         }
         
         function executeCommand(commandName, params = null, forceRaw = false) {
@@ -1199,6 +1421,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 
             elif action == 'test_connection':
                 success, result = tester.test_connection()
+                await websocket.send_json({'type': 'result', 'data': result})
+                
+            elif action == 'discover_command':
+                command = data.get('command')
+                success, result = tester.test_raw_command_discovery(command)
                 await websocket.send_json({'type': 'result', 'data': result})
                 
             elif action == 'execute_command':
