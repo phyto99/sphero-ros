@@ -33,6 +33,28 @@ class SimpleSpheroTester:
             'movements': []
         }
         
+        # Matrix display tracking
+        self.matrix_state = [[{'r': 0, 'g': 0, 'b': 0} for _ in range(8)] for _ in range(8)]
+        self.last_matrix_command = None
+        self.matrix_tracking_enabled = True
+        
+        # Sphero health monitoring
+        self.sphero_health = {
+            'heading': 0,
+            'battery_percentage': 0,
+            'accelerometer': {'x': 0, 'y': 0, 'z': 0},
+            'gyroscope': {'x': 0, 'y': 0, 'z': 0},
+            'last_update': 0
+        }
+        self.gyro_stabilization_enabled = True
+        
+        # LED status tracking
+        self.led_status = {
+            'back_led': {'r': 0, 'g': 0, 'b': 0, 'active': False},
+            'front_led': {'r': 0, 'g': 0, 'b': 0, 'active': False},
+            'main_led': {'r': 0, 'g': 0, 'b': 0, 'active': False}
+        }
+        
         # Integrity validation
         self.last_verified_state = None
         self.state_verification_enabled = True
@@ -181,6 +203,9 @@ class SimpleSpheroTester:
                     messages.append(f"   ⚠️  Using original toy object")
                 
                 self.connected = True
+                
+                # Reset display states on fresh connection
+                self.reset_display_states()
                 
                 messages.append("\n" + "="*60)
                 messages.append("✅ CONNECTION SUCCESS!")
@@ -349,6 +374,12 @@ class SimpleSpheroTester:
                 result = api_obj(*params)
                 # Track active effects
                 self._track_command_effect(command_name, params)
+                # Update matrix state for matrix commands
+                if 'matrix' in command_name.lower():
+                    self.update_matrix_state(command_name, params)
+                # Update LED status for LED commands
+                if command_name in ['set_back_led', 'set_front_led', 'set_main_led'] and params:
+                    self.update_led_status(command_name, params)
                 return True, f"✅ EDU {command_name}({self._format_params(params)}) → {self._format_result(result)}"
             except Exception as e:
                 # Auto-fix with safe defaults
@@ -361,6 +392,12 @@ class SimpleSpheroTester:
             result = api_obj(*safe_params)
             # Track active effects
             self._track_command_effect(command_name, safe_params)
+            # Update matrix state for matrix commands
+            if 'matrix' in command_name.lower():
+                self.update_matrix_state(command_name, safe_params)
+            # Update LED status for LED commands
+            if command_name in ['set_back_led', 'set_front_led', 'set_main_led'] and safe_params:
+                self.update_led_status(command_name, safe_params)
             return True, f"✅ EDU {command_name}({self._format_params(safe_params)}) → SAFE DEFAULTS → {self._format_result(result)}"
         except Exception as e:
             return False, f"❌ EDU {command_name} failed: {e}"
@@ -492,6 +529,19 @@ class SimpleSpheroTester:
                 result = obj(*params) if params else obj()
                 # Track RAW command effects
                 self._track_raw_command_effect(command_name, params)
+                # Update matrix state for matrix-related commands
+                if (command_name.lower() in [
+                    'draw_compressed_frame_player_fill',
+                    'draw_compressed_frame_player_pixel', 
+                    'draw_compressed_frame_player_line',
+                    'set_compressed_frame_player_one_color',
+                    'stop_compressed_frame_player_animation',
+                    'set_character_matrix_display_fill',
+                    'set_character_matrix_display_pixel',
+                    'set_character_matrix_display_line',
+                    'clear_character_matrix_display'
+                ] or 'matrix' in command_name.lower()):
+                    self.update_matrix_state(command_name, params)
                 return True, f"✅ RAW {command_name}({self._format_params(params)}) → {self._format_result(result)}"
             else:
                 return True, f"📊 RAW {command_name} = {obj}"
@@ -517,6 +567,19 @@ class SimpleSpheroTester:
             result = obj(*fixed_params)
             # Track RAW command effects
             self._track_raw_command_effect(command_name, fixed_params)
+            # Update matrix state for matrix-related commands
+            if (command_name.lower() in [
+                'draw_compressed_frame_player_fill',
+                'draw_compressed_frame_player_pixel', 
+                'draw_compressed_frame_player_line',
+                'set_compressed_frame_player_one_color',
+                'stop_compressed_frame_player_animation',
+                'set_character_matrix_display_fill',
+                'set_character_matrix_display_pixel',
+                'set_character_matrix_display_line',
+                'clear_character_matrix_display'
+            ] or 'matrix' in command_name.lower()):
+                self.update_matrix_state(command_name, fixed_params)
             return True, f"✅ RAW {command_name}({self._format_params(fixed_params)}) → AUTO-FIXED → {self._format_result(result)}"
         except Exception as e2:
             return False, f"❌ RAW {command_name} auto-fix failed: {e2}"
@@ -675,6 +738,269 @@ class SimpleSpheroTester:
                             return False, f"❌ Failed to stop {effect['command']}: {e}"
         
         return False, f"❌ Effect {effect_id} not found"
+    
+    def update_matrix_state(self, command_name: str, params: List[Any]):
+        """Track matrix state changes from commands"""
+        if not self.matrix_tracking_enabled:
+            return
+        
+        try:
+            if command_name == 'clear_matrix':
+                # Only clear matrix, not LEDs
+                self.matrix_state = [[{'r': 0, 'g': 0, 'b': 0} for _ in range(8)] for _ in range(8)]
+                
+            # Detect when matrix is being cleared/turned off
+            elif (command_name in ['draw_compressed_frame_player_fill', 'set_compressed_frame_player_one_color'] 
+                  and len(params) >= 3 and int(params[0]) == 0 and int(params[1]) == 0 and int(params[2]) == 0):
+                # All black = matrix off
+                self.matrix_state = [[{'r': 0, 'g': 0, 'b': 0} for _ in range(8)] for _ in range(8)]
+                
+            elif command_name == 'set_matrix_character' and len(params) >= 2:
+                char = str(params[0]) if params[0] else 'A'
+                color = params[1] if hasattr(params[1], 'r') else type('Color', (), {'r': 255, 'g': 255, 'b': 255})()
+                
+                patterns = {
+                    'A': [(1,0),(2,0),(3,0),(4,0),(5,0),(0,1),(0,2),(0,3),(0,4),(0,5),(6,1),(6,2),(6,3),(6,4),(6,5),(2,3)],
+                    'X': [(0,0),(1,1),(2,2),(3,3),(4,4),(5,5),(6,6),(7,7),(0,7),(1,6),(2,5),(3,4),(4,3),(5,2),(6,1),(7,0)],
+                    'O': [(1,0),(2,0),(3,0),(4,0),(5,0),(0,1),(0,2),(0,3),(0,4),(0,5),(6,1),(6,2),(6,3),(6,4),(6,5),(1,6),(2,6),(3,6),(4,6),(5,6)]
+                }
+                
+                self.matrix_state = [[{'r': 0, 'g': 0, 'b': 0} for _ in range(8)] for _ in range(8)]
+                if char.upper() in patterns:
+                    for x, y in patterns[char.upper()]:
+                        if 0 <= x < 8 and 0 <= y < 8:
+                            self.matrix_state[y][x] = {'r': color.r, 'g': color.g, 'b': color.b}
+                
+            elif command_name == 'draw_compressed_frame_player_fill' and len(params) >= 3:
+                if len(params) >= 7:  # x1, y1, x2, y2, r, g, b format
+                    r, g, b = params[4], params[5], params[6]
+                else:  # r, g, b format
+                    r, g, b = params[0], params[1], params[2]
+                for y in range(8):
+                    for x in range(8):
+                        self.matrix_state[y][x] = {'r': int(r), 'g': int(g), 'b': int(b)}
+                        
+            elif command_name == 'set_compressed_frame_player_one_color' and len(params) >= 3:
+                r, g, b = params[0], params[1], params[2]
+                for y in range(8):
+                    for x in range(8):
+                        self.matrix_state[y][x] = {'r': int(r), 'g': int(g), 'b': int(b)}
+                        
+            elif command_name == 'draw_compressed_frame_player_pixel' and len(params) >= 5:
+                x, y, r, g, b = params[0], params[1], params[2], params[3], params[4]
+                if 0 <= x < 8 and 0 <= y < 8:
+                    self.matrix_state[y][x] = {'r': int(r), 'g': int(g), 'b': int(b)}
+                    
+            elif command_name == 'draw_compressed_frame_player_line' and len(params) >= 7:
+                x1, y1, x2, y2, r, g, b = params[0], params[1], params[2], params[3], params[4], params[5], params[6]
+                dx = abs(x2 - x1)
+                dy = abs(y2 - y1)
+                sx = 1 if x1 < x2 else -1
+                sy = 1 if y1 < y2 else -1
+                err = dx - dy
+                
+                x, y = x1, y1
+                while True:
+                    if 0 <= x < 8 and 0 <= y < 8:
+                        self.matrix_state[y][x] = {'r': int(r), 'g': int(g), 'b': int(b)}
+                    if x == x2 and y == y2:
+                        break
+                    e2 = 2 * err
+                    if e2 > -dy:
+                        err -= dy
+                        x += sx
+                    if e2 < dx:
+                        err += dx
+                        y += sy
+            
+            # Detect stop/clear commands
+            elif command_name in ['stop_compressed_frame_player_animation', 'clear_character_matrix_display']:
+                self.matrix_state = [[{'r': 0, 'g': 0, 'b': 0} for _ in range(8)] for _ in range(8)]
+            
+            self.last_matrix_command = {
+                'command': command_name,
+                'params': params,
+                'timestamp': time.time()
+            }
+            
+        except Exception as e:
+            pass
+    
+    def update_led_status(self, command_name: str, params: List[Any]):
+        """Track LED status changes from commands"""
+        try:
+            if command_name in ['set_back_led', 'set_front_led', 'set_main_led'] and params:
+                led_name = command_name  # Keep full name for mapping
+                color = params[0] if params and hasattr(params[0], 'r') else None
+                
+                if color:
+                    self.led_status[led_name] = {
+                        'r': color.r,
+                        'g': color.g, 
+                        'b': color.b,
+                        'active': color.r > 0 or color.g > 0 or color.b > 0
+                    }
+        except Exception as e:
+            pass
+    
+    def get_matrix_display_data(self):
+        """Get complete matrix display data"""
+        return {
+            'matrix': self.matrix_state,
+            'current_heading': self.sphero_health.get('heading', 0),
+            'gyro_enabled': self.gyro_stabilization_enabled,
+            'led_status': self.led_status,
+            'last_command': self.last_matrix_command,
+            'tracking_enabled': self.matrix_tracking_enabled,
+            'timestamp': time.time()
+        }
+    
+
+    
+    def get_live_sensor_data(self):
+        """Get live sensor data"""
+        if not self.connected or not self.api:
+            return None
+        
+        sensor_data = {
+            'timestamp': time.time(),
+            'heading': None,
+            'battery_percentage': None,
+            'accelerometer': None,
+            'gyroscope': None,
+            'stabilization_enabled': self.gyro_stabilization_enabled
+        }
+        
+        try:
+            heading = self.api.get_heading()
+            if heading is not None:
+                sensor_data['heading'] = heading
+                self.sphero_health['heading'] = heading
+        except:
+            pass
+        
+        try:
+            if self.toy and hasattr(self.toy, 'get_battery_percentage'):
+                battery = self.toy.get_battery_percentage()
+                if battery is not None:
+                    sensor_data['battery_percentage'] = battery
+        except:
+            pass
+        
+        try:
+            if hasattr(self.api, 'get_acceleration'):
+                accel = self.api.get_acceleration()
+                if accel:
+                    sensor_data['accelerometer'] = accel
+        except:
+            pass
+        
+        try:
+            if hasattr(self.api, 'get_gyroscope'):
+                gyro = self.api.get_gyroscope()
+                if gyro:
+                    sensor_data['gyroscope'] = gyro
+        except:
+            pass
+        
+        return sensor_data
+    
+    def toggle_gyro_stabilization(self):
+        """Toggle gyroscope stabilization"""
+        if not self.connected or not self.api:
+            return False, "Not connected"
+        
+        try:
+            self.gyro_stabilization_enabled = not self.gyro_stabilization_enabled
+            self.api.set_stabilization(self.gyro_stabilization_enabled)
+            status = "enabled" if self.gyro_stabilization_enabled else "disabled"
+            return True, f"Gyroscope stabilization {status}"
+        except Exception as e:
+            return False, f"Failed to toggle stabilization: {e}"
+    
+    def reset_display_states(self):
+        """Reset all display states to match fresh Sphero state"""
+        # Clear matrix state
+        self.matrix_state = [[{'r': 0, 'g': 0, 'b': 0} for _ in range(8)] for _ in range(8)]
+        
+        # Clear LED states
+        self.led_status = {
+            'set_back_led': {'r': 0, 'g': 0, 'b': 0, 'active': False},
+            'set_front_led': {'r': 0, 'g': 0, 'b': 0, 'active': False},
+            'set_main_led': {'r': 0, 'g': 0, 'b': 0, 'active': False}
+        }
+        
+        # Clear last command
+        self.last_matrix_command = None
+    
+    def clear_matrix_only(self):
+        """Clear only the matrix, not LEDs"""
+        if not self.connected or not self.api:
+            return False, "Not connected"
+        
+        try:
+            # Clear matrix via EDU API
+            if hasattr(self.api, 'clear_matrix'):
+                self.api.clear_matrix()
+            
+            # Clear compressed frame player with multiple methods
+            if self.toy:
+                # Method 1: Fill entire frame with black
+                if hasattr(self.toy, 'draw_compressed_frame_player_fill'):
+                    self.toy.draw_compressed_frame_player_fill(0, 0, 7, 7, 0, 0, 0)
+                
+                # Method 2: Set one color to black (the command that was causing issues)
+                if hasattr(self.toy, 'set_compressed_frame_player_one_color'):
+                    self.toy.set_compressed_frame_player_one_color(0, 0, 0)
+                
+                # Method 3: Stop any running animations
+                if hasattr(self.toy, 'stop_compressed_frame_player_animation'):
+                    self.toy.stop_compressed_frame_player_animation()
+                
+                # Method 4: Clear character matrix display
+                if hasattr(self.toy, 'clear_character_matrix_display'):
+                    self.toy.clear_character_matrix_display()
+            
+            # Reset only matrix state, keep LED states
+            self.matrix_state = [[{'r': 0, 'g': 0, 'b': 0} for _ in range(8)] for _ in range(8)]
+            
+            # Clear matrix effects from active effects tracking
+            self.active_effects['matrix_effects'].clear()
+            
+            return True, "Matrix cleared completely"
+            
+        except Exception as e:
+            return False, f"Failed to clear matrix: {e}"
+    
+    def clear_all_display(self):
+        """Clear all display elements on the Sphero"""
+        if not self.connected or not self.api:
+            return False, "Not connected"
+        
+        try:
+            # Clear matrix
+            if hasattr(self.api, 'clear_matrix'):
+                self.api.clear_matrix()
+            
+            # Clear LEDs
+            if hasattr(self.api, 'set_front_led'):
+                self.api.set_front_led(Color(0, 0, 0))
+            if hasattr(self.api, 'set_back_led'):
+                self.api.set_back_led(Color(0, 0, 0))
+            if hasattr(self.api, 'set_main_led'):
+                self.api.set_main_led(Color(0, 0, 0))
+            
+            # Clear compressed frame player
+            if self.toy and hasattr(self.toy, 'draw_compressed_frame_player_fill'):
+                self.toy.draw_compressed_frame_player_fill(0, 0, 7, 7, 0, 0, 0)
+            
+            # Reset our tracking states
+            self.reset_display_states()
+            
+            return True, "All display elements cleared"
+            
+        except Exception as e:
+            return False, f"Failed to clear display: {e}"
     
     def force_stop_all_effects(self):
         """Emergency stop - turn off all effects and reset Sphero"""
@@ -1244,6 +1570,9 @@ class SimpleSpheroTester:
         self.led_states = {'back_led': False, 'front_led': False, 'main_led': False}
         self.connected = False
         
+        # Reset display states on disconnect
+        self.reset_display_states()
+        
         if force:
             messages.append("🔥 AGGRESSIVE DISCONNECT COMPLETE")
             messages.append("💡 Sphero should now be available for new connections")
@@ -1601,6 +1930,189 @@ async def get_homepage():
             color: white;
         }
         
+        .matrix-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            padding: 16px;
+        }
+        
+        .sphero-display {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            width: 280px;
+            height: 280px;
+            transition: transform 0.3s ease;
+            position: relative;
+        }
+        
+        .led-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            position: absolute;
+        }
+        
+        .front-led {
+            top: -10px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+        
+        .back-led {
+            bottom: -10px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+        
+        .led-symbol {
+            font-size: 14px;
+            color: #7d8590;
+            font-weight: bold;
+            min-width: 16px;
+            text-align: center;
+        }
+        
+        .led-dot {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #21262d;
+            border: 1px solid #30363d;
+            transition: all 0.2s ease;
+        }
+        
+        .led-dot.active {
+            box-shadow: 0 0 10px rgba(255, 255, 255, 0.4);
+            border-color: rgba(255, 255, 255, 0.6);
+        }
+        
+        .matrix-grid {
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            gap: 1px;
+            background: #21262d;
+            padding: 4px;
+            border-radius: 4px;
+            width: 240px;
+            height: 240px;
+        }
+        
+        .matrix-pixel {
+            width: 28px;
+            height: 28px;
+            background: #000000;
+            border-radius: 2px;
+            transition: all 0.1s ease;
+            border: 1px solid #30363d;
+        }
+        
+        .matrix-pixel:hover {
+            border-color: #58a6ff;
+            transform: scale(1.05);
+            z-index: 1;
+            position: relative;
+        }
+        
+        .matrix-pixel.active-pixel {
+            border-color: rgba(255,255,255,0.3);
+            box-shadow: inset 0 0 2px rgba(255,255,255,0.2);
+        }
+        
+        .matrix-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            align-items: center;
+        }
+        
+        .matrix-control-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        
+        .matrix-btn {
+            padding: 6px 12px;
+            border: 1px solid #30363d;
+            border-radius: 3px;
+            background: #21262d;
+            color: #c9d1d9;
+            cursor: pointer;
+            font-size: 10px;
+            transition: all 0.1s;
+        }
+        
+        .matrix-btn:hover {
+            background: #30363d;
+            border-color: #484f58;
+        }
+        
+        .matrix-btn.active {
+            background: #238636;
+            border-color: #2ea043;
+            color: white;
+        }
+        
+        .rotation-slider {
+            width: 120px;
+            height: 4px;
+            background: #21262d;
+            border-radius: 2px;
+            outline: none;
+            -webkit-appearance: none;
+        }
+        
+        .rotation-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 12px;
+            height: 12px;
+            background: #58a6ff;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+        
+        .matrix-rotation {
+            font-size: 9px;
+            color: #7d8590;
+            background: #21262d;
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+        
+        .sensor-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 6px;
+            padding: 8px;
+        }
+        
+        .sensor-item {
+            background: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            padding: 8px;
+            text-align: center;
+        }
+        
+        .sensor-label {
+            font-size: 9px;
+            color: #7d8590;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+        
+        .sensor-value {
+            font-size: 12px;
+            font-weight: 600;
+            color: #58a6ff;
+            font-family: monospace;
+        }
+        
         .integrity-details {
             max-height: 100px;
             overflow-y: auto;
@@ -1833,6 +2345,72 @@ async def get_homepage():
                         </div>
                     </div>
                     <div class="section">
+                        <div class="section-header">Expected Matrix Display <span id="matrixRotation" class="matrix-rotation">0°</span></div>
+                        <div class="matrix-container">
+                            <div class="sphero-display" id="spheroDisplay">
+                                <!-- Front LED indicator (rotates with matrix) -->
+                                <div class="led-indicator front-led" id="frontLedIndicator">
+                                    <div class="led-symbol">F</div>
+                                    <div class="led-dot" id="frontLedDot"></div>
+                                </div>
+                                
+                                <div class="matrix-grid" id="matrixGrid">
+                                    <!-- 8x8 matrix will be generated here -->
+                                </div>
+                                
+                                <!-- Back LED indicator (rotates with matrix) -->
+                                <div class="led-indicator back-led" id="backLedIndicator">
+                                    <div class="led-symbol">B</div>
+                                    <div class="led-dot" id="backLedDot"></div>
+                                </div>
+                            </div>
+                            <div class="matrix-controls">
+                                <div class="matrix-control-row">
+                                    <button class="matrix-btn" onclick="refreshMatrixDisplay()">Refresh</button>
+                                    <button class="matrix-btn" onclick="clearMatrix()">Clear</button>
+                                </div>
+                                <div class="matrix-control-row">
+                                    <button class="matrix-btn" id="gyroToggle" onclick="toggleGyroStabilization()">Gyro</button>
+                                </div>
+                                <div class="matrix-control-row">
+                                    <label>Rotation Offset:</label>
+                                    <input type="range" id="rotationSlider" min="0" max="360" value="0" 
+                                           oninput="setMatrixRotation(this.value)" class="rotation-slider">
+                                    <span id="rotationValue">0°</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="section">
+                        <div class="section-header">Live Sensor Data</div>
+                        <div class="sensor-grid">
+                            <div class="sensor-item">
+                                <div class="sensor-label">Heading</div>
+                                <div class="sensor-value" id="liveHeading">N/A</div>
+                            </div>
+                            <div class="sensor-item">
+                                <div class="sensor-label">Battery</div>
+                                <div class="sensor-value" id="liveBattery">N/A</div>
+                            </div>
+                            <div class="sensor-item">
+                                <div class="sensor-label">Gyro Stab</div>
+                                <div class="sensor-value" id="stabilizationStatus">N/A</div>
+                            </div>
+                            <div class="sensor-item">
+                                <div class="sensor-label">Accel X</div>
+                                <div class="sensor-value" id="accelX">N/A</div>
+                            </div>
+                            <div class="sensor-item">
+                                <div class="sensor-label">Accel Y</div>
+                                <div class="sensor-value" id="accelY">N/A</div>
+                            </div>
+                            <div class="sensor-item">
+                                <div class="sensor-label">Accel Z</div>
+                                <div class="sensor-value" id="accelZ">N/A</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="section">
                         <div class="section-header">🔍 Integrity Monitor <span id="integrityStatus" class="integrity-status">UNKNOWN</span></div>
                         <div class="controls-grid">
                             <div class="control-btn info" onclick="checkIntegrity()">🔍 Check</div>
@@ -1947,6 +2525,10 @@ async def get_homepage():
                 }
             } else if (type === 'active_effects') {
                 updateActiveEffects(data);
+            } else if (type === 'matrix_display') {
+                updateMatrixDisplay(data);
+            } else if (type === 'live_sensors') {
+                updateLiveSensors(data);
             } else if (type === 'integrity_status') {
                 updateIntegrityStatus(data);
             }
@@ -2422,6 +3004,214 @@ async def get_homepage():
             }, 5000);
         }
         
+        // Matrix Display Functions
+        function initializeMatrixDisplay() {
+            const matrixGrid = document.getElementById('matrixGrid');
+            matrixGrid.innerHTML = '';
+            
+            // Create 8x8 grid
+            for (let y = 0; y < 8; y++) {
+                for (let x = 0; x < 8; x++) {
+                    const pixel = document.createElement('div');
+                    pixel.className = 'matrix-pixel';
+                    pixel.id = `pixel-${x}-${y}`;
+                    pixel.style.backgroundColor = '#000000';
+                    matrixGrid.appendChild(pixel);
+                }
+            }
+        }
+        
+        function refreshMatrixDisplay() {
+            if (!connected) return;
+            
+            ws.send(JSON.stringify({
+                action: 'get_matrix_display'
+            }));
+        }
+        
+        function updateMatrixDisplay(matrixData) {
+            const matrix = matrixData.matrix;
+            const heading = matrixData.current_heading || 0;
+            const gyroEnabled = matrixData.gyro_enabled || false;
+            
+            // Update heading display only (rotation is client-side)
+            document.getElementById('matrixRotation').textContent = `H:${heading.toFixed(1)}°`;
+            
+            // Update LED status indicators
+            if (matrixData.led_status) {
+                updateLedIndicators(matrixData.led_status);
+            }
+            
+            // Don't override client-side rotation - let user control it
+            // The rotation slider and wrapper transform are handled by setMatrixRotation()
+            
+            // Update matrix pixels
+            for (let y = 0; y < 8; y++) {
+                for (let x = 0; x < 8; x++) {
+                    const pixel = document.getElementById(`pixel-${x}-${y}`);
+                    if (pixel && matrix && matrix[y] && matrix[y][x]) {
+                        const color = matrix[y][x];
+                        const rgb = `rgb(${color.r}, ${color.g}, ${color.b})`;
+                        pixel.style.backgroundColor = rgb;
+                        
+                        const brightness = (color.r + color.g + color.b) / 3;
+                        if (brightness > 0) {
+                            pixel.style.opacity = 1.0;  // Full opacity for active pixels
+                            pixel.classList.add('active-pixel');
+                        } else {
+                            pixel.style.opacity = 1.0;  // Keep black boxes fully opaque
+                            pixel.classList.remove('active-pixel');
+                        }
+                        
+                        if (brightness > 200) {
+                            pixel.style.border = '1px solid rgba(255,255,255,0.3)';
+                        } else {
+                            pixel.style.border = '1px solid #30363d';
+                        }
+                    }
+                }
+            }
+        }
+        
+        function setMatrixRotation(degrees) {
+            // Pure client-side rotation - no server delay
+            document.getElementById('rotationValue').textContent = degrees + '°';
+            
+            // Apply rotation to entire sphero display (matrix + LEDs)
+            const spheroDisplay = document.getElementById('spheroDisplay');
+            if (spheroDisplay) {
+                spheroDisplay.style.transform = `rotate(${degrees}deg)`;
+            }
+        }
+        
+        function clearMatrix() {
+            if (!connected) return;
+            
+            // Clear matrix visualization immediately (client-side)
+            clearMatrixVisualization();
+            
+            // Send clear matrix command to Sphero (only matrix, not LEDs)
+            ws.send(JSON.stringify({
+                action: 'clear_matrix_only'
+            }));
+            
+            // Force refresh after a short delay to ensure server state is updated
+            setTimeout(() => {
+                if (connected) {
+                    refreshMatrixDisplay();
+                }
+            }, 500);
+        }
+        
+        function clearMatrixVisualization() {
+            // Immediately clear the matrix display (client-side)
+            for (let y = 0; y < 8; y++) {
+                for (let x = 0; x < 8; x++) {
+                    const pixel = document.getElementById(`pixel-${x}-${y}`);
+                    if (pixel) {
+                        pixel.style.backgroundColor = '#000000';
+                        pixel.style.opacity = 1.0;
+                        pixel.classList.remove('active-pixel');
+                        pixel.style.border = '1px solid #30363d';
+                    }
+                }
+            }
+        }
+        
+        function toggleGyroStabilization() {
+            if (!connected) return;
+            
+            ws.send(JSON.stringify({
+                action: 'toggle_gyro_stabilization'
+            }));
+        }
+        
+        function refreshSensors() {
+            if (!connected) return;
+            
+            ws.send(JSON.stringify({
+                action: 'get_live_sensors'
+            }));
+        }
+        
+        function updateLedIndicators(ledStatus) {
+            // Update front LED
+            const frontDot = document.getElementById('frontLedDot');
+            if (frontDot && ledStatus.set_front_led) {
+                const front = ledStatus.set_front_led;
+                if (front.active) {
+                    frontDot.style.backgroundColor = `rgb(${front.r}, ${front.g}, ${front.b})`;
+                    frontDot.classList.add('active');
+                } else {
+                    frontDot.style.backgroundColor = '#21262d';
+                    frontDot.classList.remove('active');
+                }
+            }
+            
+            // Update back LED
+            const backDot = document.getElementById('backLedDot');
+            if (backDot && ledStatus.set_back_led) {
+                const back = ledStatus.set_back_led;
+                if (back.active) {
+                    backDot.style.backgroundColor = `rgb(${back.r}, ${back.g}, ${back.b})`;
+                    backDot.classList.add('active');
+                } else {
+                    backDot.style.backgroundColor = '#21262d';
+                    backDot.classList.remove('active');
+                }
+            }
+        }
+        
+        function updateLiveSensors(sensorData) {
+            if (!sensorData) return;
+            
+            if (sensorData.heading !== null && sensorData.heading !== undefined) {
+                document.getElementById('liveHeading').textContent = sensorData.heading.toFixed(1) + '°';
+            } else {
+                document.getElementById('liveHeading').textContent = 'N/A';
+            }
+            
+            if (sensorData.battery_percentage !== null && sensorData.battery_percentage !== undefined) {
+                document.getElementById('liveBattery').textContent = sensorData.battery_percentage.toFixed(0) + '%';
+            } else {
+                document.getElementById('liveBattery').textContent = 'N/A';
+            }
+            
+            const gyroBtn = document.getElementById('gyroToggle');
+            if (sensorData.stabilization_enabled) {
+                document.getElementById('stabilizationStatus').textContent = 'ON';
+                gyroBtn.textContent = 'Gyro ON';
+                gyroBtn.className = 'matrix-btn active';
+            } else {
+                document.getElementById('stabilizationStatus').textContent = 'OFF';
+                gyroBtn.textContent = 'Gyro OFF';
+                gyroBtn.className = 'matrix-btn';
+            }
+            
+            if (sensorData.accelerometer) {
+                document.getElementById('accelX').textContent = sensorData.accelerometer.x.toFixed(2);
+                document.getElementById('accelY').textContent = sensorData.accelerometer.y.toFixed(2);
+                document.getElementById('accelZ').textContent = sensorData.accelerometer.z.toFixed(2);
+            } else {
+                document.getElementById('accelX').textContent = 'N/A';
+                document.getElementById('accelY').textContent = 'N/A';
+                document.getElementById('accelZ').textContent = 'N/A';
+            }
+        }
+        
+        // Auto-refresh matrix and sensors
+        setInterval(() => {
+            if (connected) {
+                refreshMatrixDisplay();
+                refreshSensors();
+            }
+        }, 2000);
+        
+        // Initialize matrix display on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeMatrixDisplay();
+        });
+        
         initWebSocket();
     </script>
 </body>
@@ -2512,6 +3302,38 @@ async def websocket_endpoint(websocket: WebSocket):
             elif action == 'clear_compressed_frame':
                 success, result = tester.clear_compressed_frame_player_completely()
                 await websocket.send_json({'type': 'result', 'data': result})
+                
+            elif action == 'get_matrix_display':
+                matrix_data = tester.get_matrix_display_data()
+                await websocket.send_json({'type': 'matrix_display', 'data': matrix_data})
+                
+
+                
+            elif action == 'toggle_gyro_stabilization':
+                success, result = tester.toggle_gyro_stabilization()
+                await websocket.send_json({'type': 'result', 'data': result})
+                
+            elif action == 'get_live_sensors':
+                sensor_data = tester.get_live_sensor_data()
+                await websocket.send_json({'type': 'live_sensors', 'data': sensor_data})
+                
+            elif action == 'clear_matrix_only':
+                success, result = tester.clear_matrix_only()
+                await websocket.send_json({'type': 'result', 'data': result})
+                # Send updated matrix display immediately after clearing
+                if success:
+                    await asyncio.sleep(0.1)  # Small delay to ensure commands are processed
+                    matrix_data = tester.get_matrix_display_data()
+                    await websocket.send_json({'type': 'matrix_display', 'data': matrix_data})
+                
+            elif action == 'clear_all_display':
+                success, result = tester.clear_all_display()
+                await websocket.send_json({'type': 'result', 'data': result})
+                # Send updated matrix display immediately after clearing
+                if success:
+                    await asyncio.sleep(0.1)  # Small delay to ensure commands are processed
+                    matrix_data = tester.get_matrix_display_data()
+                    await websocket.send_json({'type': 'matrix_display', 'data': matrix_data})
                 
             elif action == 'execute_command':
                 command = data.get('command')
