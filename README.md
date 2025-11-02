@@ -1,4 +1,4 @@
-# Sphero AI Assistant
+# Sphero AI Assistant (not complete)
 
 A low-maintenance, productivity-focused AI assistant that uses Sphero Bolt as a dynamic expression and input device. The system provides multilingual communication, psychological optimization for user growth, and comprehensive productivity management.
 
