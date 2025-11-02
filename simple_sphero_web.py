@@ -67,7 +67,7 @@ class SimpleSpheroTester:
             'set_front_led_output': {'params': ['brightness'], 'safe_defaults': [255]},
             
             # Matrix/Display Commands  
-            'draw_compressed_frame_player_fill': {'params': ['r', 'g', 'b'], 'safe_defaults': [255, 0, 0]},
+            'draw_compressed_frame_player_fill': {'params': ['x1', 'y1', 'x2', 'y2', 'r', 'g', 'b'], 'safe_defaults': [0, 0, 7, 7, 255, 0, 0]},
             'draw_compressed_frame_player_line': {'params': ['x1', 'y1', 'x2', 'y2', 'r', 'g', 'b'], 'safe_defaults': [0, 0, 7, 7, 0, 255, 0]},
             'draw_compressed_frame_player_pixel': {'params': ['x', 'y', 'r', 'g', 'b'], 'safe_defaults': [4, 4, 0, 0, 255]},
             'set_compressed_frame_player_one_color': {'params': ['r', 'g', 'b'], 'safe_defaults': [255, 255, 0]},
@@ -548,6 +548,19 @@ class SimpleSpheroTester:
             elif len(provided_params) == 6:
                 return provided_params + [0]  # add b component
                 
+        elif 'draw_compressed_frame_player_fill' == command_name:
+            # draw_compressed_frame_player_fill(x1, y1, x2, y2, r, g, b)
+            if len(provided_params) == 3:
+                # If only RGB provided, fill entire matrix
+                return [0, 0, 7, 7] + provided_params  # full matrix + provided RGB
+            elif len(provided_params) == 4:
+                # If coordinates provided, add safe RGB
+                return provided_params + [255, 0, 0]  # coordinates + red color
+            elif len(provided_params) == 5:
+                return provided_params + [0, 0]  # add g, b components
+            elif len(provided_params) == 6:
+                return provided_params + [0]  # add b component
+                
         elif 'draw_compressed_frame_player_pixel' == command_name:
             # draw_compressed_frame_player_pixel(x, y, r, g, b)
             if len(provided_params) == 2:
@@ -652,7 +665,7 @@ class SimpleSpheroTester:
                                 if hasattr(self.api, 'clear_matrix'):
                                     self.api.clear_matrix()
                                 if hasattr(self.toy, 'draw_compressed_frame_player_fill'):
-                                    self.toy.draw_compressed_frame_player_fill(0, 0, 0)
+                                    self.toy.draw_compressed_frame_player_fill(0, 0, 7, 7, 0, 0, 0)
                                 if hasattr(self.toy, 'clear_character_matrix_display'):
                                     self.toy.clear_character_matrix_display()
                             
@@ -710,7 +723,7 @@ class SimpleSpheroTester:
                 # Clear compressed frame player completely
                 try:
                     # Method 1: Fill with black
-                    self.toy.draw_compressed_frame_player_fill(0, 0, 0)
+                    self.toy.draw_compressed_frame_player_fill(0, 0, 7, 7, 0, 0, 0)
                     results.append("✅ Frame player filled black")
                 except Exception as e:
                     results.append(f"⚠️ Frame fill failed: {e}")
@@ -846,7 +859,7 @@ class SimpleSpheroTester:
             
             # Method 3: Fill entire frame with black
             try:
-                self.toy.draw_compressed_frame_player_fill(0, 0, 0)
+                self.toy.draw_compressed_frame_player_fill(0, 0, 7, 7, 0, 0, 0)
                 results.append("✅ Filled frame with black")
             except Exception as e:
                 results.append(f"⚠️ Fill black failed: {e}")
